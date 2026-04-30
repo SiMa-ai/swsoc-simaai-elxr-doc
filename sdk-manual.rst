@@ -51,7 +51,7 @@ Terminology
 
 .. tip::
     * modalix
-    * davinci
+    
 
 
 |
@@ -64,7 +64,7 @@ Assumptions
 
 This manual assumes that **Ubuntu-22.04** host build machine is used and user is familiar with the basic Linux commands and environment.
 
-The examples shown in this manual are using **modalix** platform however instructions can be applied on **davinci** platform with little or no modifications.
+The examples shown in this manual are using **modalix** platform.
 
 Furthermore, at the time of artifacts installation, it is assumed that,
 
@@ -91,13 +91,13 @@ SDK Docker
 """"""""""
 |
 
-Along with this manual, SiMa.ai SDK Dockerfiles(one for each platform) are provided to create the SDK docker container.
+Along with this manual, SiMa.ai SDK Dockerfile is provided to create the SDK docker container.
 
 SDK docker contains all the toolchains/headers/libraries etc. needed to build the software for the SiMa.ai platform.
 
 |
 
-Building SDK Docker
+Building SDK Docker (on Host Machine)
 """""""""""""""""""
 
 |
@@ -113,7 +113,7 @@ Prerequisite
 
 |
 
-Build Docker Image
+Build Docker Image (on Host Machine)
 ==================
 |
 
@@ -147,13 +147,15 @@ Launching SDK Docker
    * Though the build environment is automatically set at the docker launch, it can also be set manually e.g.
         * ``source /opt/bin/simaai-init-build-env <platform>``
 
+   * Launch Docker from a directory where you have write permissions for e.g., /var/tmp or $HOME/tmp
+   
 |
 
 |
 
-****************
-Build Software
-****************
+**************************
+Build Software (in Docker)
+**************************
 |
 
 Linux Kernel
@@ -177,7 +179,10 @@ Configuring kernel
 .. tip::
    * platform-defconfig
        * simaai_modalix_defconfig
-       * simaai_davinci_defconfig
+
+      
+   * navigate to the simaai-linux directory to run the make command
+       
 
 .. code-block:: javascript
 
@@ -202,6 +207,7 @@ Building Kernel
 
 .. code-block:: javascript
 
+   Example:
    root@83a273303643:/data/simaai-linux# make all -j8 ARCH=arm64 LOCALVERSION="-modalix" DTC_FLAGS=-@
    ...
    ...
@@ -247,7 +253,6 @@ Configuring u-boot
 .. tip::
    - platform-defconfig
        * simaai_modalix_debug_defconfig
-       * sima_davinci-a65_defconfig
 
 .. code-block:: javascript
 
@@ -293,12 +298,14 @@ Install Artifacts
 
 List of artifacts
 
+In the docker:
 * U-boot Image
 * Linux Kernel Image
 * Linux Device Trees
 * Linux Device Tree Overlays
 * Linux Kernel Modules
 
+On the Modalix board:
 .. tip::
    eMMC has 4 partitions:
     * ``mmcblk0p1`` : u-boot primary
@@ -357,6 +364,16 @@ Copying Kernel
    root@modalix:~# strings /boot/uboot.env | grep boot_path= | cut -f2 -d"="
    /boot-0/
 
+.. tip::
+   To get the ip address of the modalix board:
+    * hostname -I
+    
+    * ip route get 1.1.1.1
+    
+    Use dd to write to the partition (do not use cp) 
+    
+    You will need root access to copy files to the board
+   
 |
 
 Linux Kernel
