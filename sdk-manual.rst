@@ -218,7 +218,7 @@ Building Kernel
 
 |
 
-Overlay Device tree
+Overlay Device tree (Optional)
 """""""""""""""""""
 |
 
@@ -432,7 +432,7 @@ Kernel Modules
 
 .. code-block:: javascript
 
-   root@83a273303643:/data# scp simaai-linux/drivers/net/phy/marvell10g.ko root@192.168.90.139:/lib/modules/6.1.22-modalix/kernel/drivers/net/phy/
+   root@83a273303643:/data# scp simaai-linux/drivers/net/phy/marvell10g.ko root@192.168.90.139:/lib/modules/6.18.3-modalix/kernel/drivers/net/phy/
    root@192.168.90.139's password: 
    marvell10g.ko                                                         100%   24KB 722.7KB/s   00:00 
 
@@ -448,7 +448,7 @@ Post Install
 
 .. code-block:: bash
 
-   root@modalix:~# depmod -a 6.1.22-modalix
+   root@modalix:~# depmod -a 6.18.3-modalix
    root@modalix:~# sync
    root@modalix:~# reboot
 
