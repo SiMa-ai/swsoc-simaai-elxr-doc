@@ -1,0 +1,15 @@
+[Unit]
+Description=Mount the active A/B slot's boot file system at /boot
+# Nothing in early boot reads /boot -- the kernel and device trees were already
+# loaded by U-Boot before Linux started -- so this runs with the ordinary local
+# file systems rather than ahead of them.
+After=local-fs.target
+ConditionPathExists=/proc/cmdline
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/simaai-mount-boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

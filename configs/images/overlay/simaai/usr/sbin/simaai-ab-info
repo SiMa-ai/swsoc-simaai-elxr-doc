@@ -1,0 +1,136 @@
+#!/bin/sh
+# Version and health of BOTH A/B systems: the running one and the fallback
+# it would roll back to. The fallback's rootfs is activation-skipped and
+# unmounted, so its version can only be read by briefly activating and
+# mounting it read-only - which is exactly what this does, and why a fleet
+# operator gets a first-class answer to "what would I roll back to?"
+# instead of manual slot surgery.
+#
+# Output is stable "key: value" lines, machine-parseable and human-readable.
+
+set -e
+export LVM_SUPPRESS_FD_WARNINGS=1
+
+ROOT_UUID_A=740d31f2-aa09-56e0-9c6e-ee357eb533d0
+ROOT_UUID_B=905013a4-b365-5e4a-8ded-0f223098085a
+
+# Running medium and slot, from the dm-init device's backing partition. On the
+# shipped image / is an overlayfs (simaai-overlay-init: lowerdir=/, upperdir
+# under /run), so findmnt reports the source as "overlay", not the backing
+# device; fall back to the kernel's root= in that case, resolving UUID=/LABEL=.
+rootdev=$(findmnt -no SOURCE / 2>/dev/null)
+case "$rootdev" in
+/dev/*) : ;;
+*) rootdev=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^root=//p' | head -1) ;;
+esac
+case "$rootdev" in
+UUID=*)  rootdev=$(blkid -U "${rootdev#UUID=}"  2>/dev/null || true) ;;
+LABEL=*) rootdev=$(blkid -L "${rootdev#LABEL=}" 2>/dev/null || true) ;;
+esac
+dmname=${rootdev#/dev/}
+disk=
+slave=
+if [ -n "$rootdev" ] && [ -d "/sys/block/$dmname/slaves" ]; then
+	slave=$(ls "/sys/block/$dmname/slaves" | head -1)
+	[ -n "$slave" ] && disk=/dev/$(lsblk -dno PKNAME "/dev/$slave")
+fi
+
+if [ -z "$disk" ]; then
+	echo "running system     : not on an A/B medium (netboot?)"
+else
+	case "$(blkid -s UUID -o value "$rootdev")" in
+	"$ROOT_UUID_A") active=A; inactive=B ;;
+	"$ROOT_UUID_B") active=B; inactive=A ;;
+	*) echo "running system     : unrecognized rootfs UUID"; exit 1 ;;
+	esac
+
+	echo "medium             : $disk"
+	echo "active slot        : $active"
+	echo "active version     : $(sed -n 's/^SIMA_BUILD_VERSION = //p' /etc/buildinfo 2>/dev/null)"
+	echo "active os          : $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+
+	# The fallback slot, read-only and put back exactly as found. Scoped
+	# with --devices: the same image on eMMC and SD means duplicate VG
+	# names, and an unscoped command is ambiguous with both visible. The PV
+	# is the dm-init rootfs device's own backing partition ($slave), which
+	# also avoids assuming a "p" partition-name separator.
+	pv=/dev/$slave
+	vg=$(vgs --devices "$pv" --noheadings -o vg_name | tr -d ' ')
+	lv=$vg/rootfs.$inactive
+	mnt=
+	activated=0
+	cleanup() {
+		[ -n "$mnt" ] && umount "$mnt" 2>/dev/null && rmdir "$mnt"
+		# An if, not '[ ] &&': as the last command a false test would become
+		# cleanup's status, and set -e would end the script at the call below.
+		if [ "$activated" = 1 ]; then
+			lvchange --devices "$pv" -an "$lv" 2>/dev/null
+		fi
+	}
+	trap cleanup EXIT
+
+	echo "fallback slot      : $inactive"
+	# tRoot's control block is the authority on whether the fallback is
+	# bootable at all: a slot invalidated by a rollback is refused by
+	# switch-slot until a full update rewrites its tRoot, so reporting a version out of it would
+	# present a rollback target that does not exist. Ask
+	# first; old firmware that cannot answer falls through to reading the
+	# slot as before.
+	valid=$(simaai-trootctl get-active-slot 2>/dev/null \
+		| sed -n 's/^slots valid[[:space:]]*:[[:space:]]*//p' | tr -d ' ')
+	bootable=unknown
+	case ",$valid," in
+	",,") ;;
+	*",$inactive,"*) bootable=yes ;;
+	*) bootable=no ;;
+	esac
+	# The fixed per-slot rootfs UUID doubles as a completion stamp: the
+	# update writes it as the slot's last install step, so any other UUID
+	# means an install died mid-write. Such a slot can still mount and
+	# show the NEW build's /etc/buildinfo (the ext4 head lands first) over
+	# the old slot's tail - a version that must not be reported.
+	expect_uuid=$ROOT_UUID_A
+	[ "$inactive" = B ] && expect_uuid=$ROOT_UUID_B
+	# A slot has several states worth telling apart, because two of them
+	# are the normal life of a board flashed with an A-only image: no
+	# volume at all until simaai-growlvm reserves one, then a reserved but
+	# empty volume until the first update fills it (the control block
+	# marks such a slot invalid too, so the emptiness checks must come
+	# before the control-block verdict or a factory board would read as
+	# "retired by a rollback"). Only a completed, control-block-valid
+	# install is something to roll back to; a POPULATED slot the control
+	# block distrusts is a rollback retirement and is reported without
+	# being mounted.
+	if ! lvs --devices "$pv" "$lv" >/dev/null 2>&1; then
+		echo "fallback state     : no volume (reserved by simaai-growlvm on first boot)"
+	elif lvchange --devices "$pv" -K -ay "$lv" 2>/dev/null; then
+		activated=1
+		fstype=$(blkid -s TYPE -o value "/dev/$lv" 2>/dev/null || true)
+		got_uuid=$(blkid -s UUID -o value "/dev/$lv" 2>/dev/null || true)
+		if [ -z "$fstype" ]; then
+			echo "fallback state     : empty (reserved, awaiting its first update)"
+		elif [ "$bootable" = no ]; then
+			echo "fallback state     : invalid (retired by a rollback: control block trusts only '$valid'; a full update re-enables it - an os-only update into this slot fails at switch-slot)"
+		elif [ "$got_uuid" != "$expect_uuid" ]; then
+			echo "fallback state     : incomplete install (an update into this slot was interrupted; not bootable)"
+		else
+			mnt=$(mktemp -d)
+			if mount -o ro "/dev/$lv" "$mnt" 2>/dev/null; then
+				echo "fallback version   : $(sed -n 's/^SIMA_BUILD_VERSION = //p' "$mnt/etc/buildinfo" 2>/dev/null)"
+				echo "fallback os        : $(. "$mnt/etc/os-release" 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+			else
+				echo "fallback state     : unmountable (no valid file system)"
+				rmdir "$mnt"; mnt=
+			fi
+		fi
+	else
+		echo "fallback state     : volume not activatable"
+	fi
+	cleanup
+	trap - EXIT
+	mnt=; activated=0
+fi
+
+# tRoot's view: per-slot validity, pending flips, rollback latch.
+simaai-trootctl get-active-slot
+simaai-trootctl rollback-status

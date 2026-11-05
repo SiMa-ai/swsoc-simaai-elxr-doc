@@ -1,0 +1,136 @@
+#!/bin/bash
+#
+# simaai-mount-uboot-env - mount the active A/B slot's boot file system at
+# /var/uboot, so fw_printenv/fw_setenv can reach the U-Boot environment through
+# a path that does not move.
+#
+# U-Boot keeps its environment in a file, uboot.env, on the boot file system of
+# the slot it was started from: CONFIG_ENV_IS_IN_FAT, with the board's
+# env_fat_get_dev_part() override taking the partition from the slot tRoot
+# published. libubootenv has no FAT driver of its own and can only be given a
+# path, so /etc/fw_env.config has to name that file through a mount -- and the
+# partition behind it is mmcblk0p1 on slot A, mmcblk0p2 on slot B.
+#
+# That is the same partition simaai-mount-boot puts at /boot, and pointing the
+# config there was the obvious thing to do. It is not the right thing: /boot
+# answers "where did this boot's kernel come from", which is only the eMMC slot
+# while the board boots from eMMC. Boot the same rootfs from USB, SD or the
+# network and /boot is another file system or none at all, while the
+# environment the next boot will read still sits on the eMMC. Two questions,
+# two mounts; this one owns the environment and nothing else, so the config it
+# serves is a static file rather than something regenerated per boot.
+#
+# Which slot that is comes from tRoot, which owns slot selection for the whole
+# chain -- its own firmware slot, the boot partition it hands U-Boot, and
+# thereby the rootfs. Asking it directly is what makes this mount independent
+# of how the running system was started, which is the whole point of giving the
+# environment a mount of its own: a board booted from USB or the network still
+# gets the eMMC environment its next boot will read.
+#
+# simaai-trootctl get-active-slot prints
+#
+#	running slot        : A
+#	control block       : blank/invalid -> factory (boots slot A)
+#
+# so the parse takes the field after the colon on the "running slot" line and
+# nothing else. The control block line ends in "slot A" as well and names the
+# slot the *next* boot would fall back to, which is not the question here, so a
+# looser match (grep for a bare A, or for "slot") would read the wrong line
+# whenever the two differ -- exactly the case that matters.
+#
+# tRoot is not always there to answer. The tool comes from the troot package
+# and needs the HPI driver to reach the firmware at all, and the overlay this
+# script ships in reaches every flavor, including targets with no tRoot
+# behind it. No answer means slot A: that is tRoot's own default, the one its
+# control block reports as "blank/invalid -> factory (boots slot A)", so a
+# board that cannot say which slot it runs is treated as running the slot it
+# would boot from a blank control block.
+#
+# Mounted read-only, like /boot: saving the environment from Linux is a
+# development convenience (fw_setenv then needs "mount -o remount,rw /var/uboot"
+# first), nothing in the update path relies on it, and an update overwrites the
+# whole boot file system, uboot.env included. Note that while /boot has the same
+# partition mounted, vfat shares one superblock between the two mount points, so
+# such a remount flips both.
+#
+# The default slot is a guess where an answer would be a fact, so it is held to
+# a lower standard than one: a board whose partition is simply not there has no
+# A/B eMMC layout to address at all (a bare-rootfs bring-up, for example), and saying
+# so and stopping beats failing the unit on every boot. A slot tRoot named and
+# a partition that does not exist is a different thing, and does fail.
+#
+# An empty mount point is the honest outcome of that case -- fw_printenv fails
+# to open the file instead of reading the wrong one, which is exactly what makes
+# a static fw_env.config safe. The rootfs carries its own /boot/uboot.env from
+# the u-boot-modalix package, and no mount of ours can make it look like the
+# live environment from here.
+set -eu
+
+MOUNTPOINT=/var/uboot
+# Boot partitions 1 and 2 of the eMMC, one per slot, fixed by the image's
+# partition table.
+BOOTPART_A=/dev/mmcblk0p1
+BOOTPART_B=/dev/mmcblk0p2
+
+log() { echo "simaai-mount-uboot-env: $*"; }
+
+# Print tRoot's running slot, or nothing at all when it cannot be asked. Never
+# fails the script: a board without the tool, without the HPI driver, or
+# without tRoot takes the default below, and does not stop here.
+troot_slot() {
+	command -v simaai-trootctl >/dev/null 2>&1 || return 0
+	# Taken in two steps so the tool's exit status is still visible: in a
+	# pipeline it would be the last command's, and awk succeeds happily on
+	# the output of a failed query.
+	local out
+	out="$(simaai-trootctl get-active-slot 2>/dev/null)" || return 0
+	# 'exit' after the first match, so only the "running slot" line is
+	# ever considered even if a future tRoot prints those words twice.
+	# The field separator eats the padding the tool aligns its colons
+	# with; tr removes what is left, a CR from a serial console included.
+	printf '%s\n' "${out}" |
+		awk -F': *' '/running slot/ { print $2; exit }' |
+		tr -d '[:space:]'
+}
+
+slot="$(troot_slot)"
+case "${slot}" in
+A | a) BOOTDEV="${BOOTPART_A}"; SOURCE="tRoot running slot A" ;;
+B | b) BOOTDEV="${BOOTPART_B}"; SOURCE="tRoot running slot B" ;;
+"")
+	BOOTDEV="${BOOTPART_A}"
+	SOURCE="no answer from simaai-trootctl, assuming slot A"
+	;;
+*)
+	# Something answered, but not with a slot. Take the default and say
+	# loudly what was read: a default that silently covers an
+	# unrecognised answer is how a changed output format goes unnoticed
+	# until someone reads the wrong environment.
+	log "warning: simaai-trootctl reported running slot '${slot}'," \
+	    "which is neither A nor B; assuming slot A" >&2
+	BOOTDEV="${BOOTPART_A}"
+	SOURCE="unrecognised slot '${slot}', assuming slot A"
+	;;
+esac
+
+if [ ! -b "${BOOTDEV}" ]; then
+	# A board that has no such partition has no A/B eMMC layout to
+	# address, which is a thing to report rather than to fail on -- but
+	# only when nothing claimed the slot exists.
+	if [ -z "${slot}" ]; then
+		log "${BOOTDEV} is not a block device and no slot was" \
+		    "reported; leaving ${MOUNTPOINT} unmounted"
+		exit 0
+	fi
+	log "error: ${BOOTDEV} (${SOURCE}) is not a block device" >&2
+	exit 1
+fi
+
+if findmnt -rno TARGET "${MOUNTPOINT}" >/dev/null 2>&1; then
+	log "${MOUNTPOINT} is already mounted"
+	exit 0
+fi
+
+mkdir -p "${MOUNTPOINT}"
+mount -o ro "${BOOTDEV}" "${MOUNTPOINT}"
+log "mounted ${BOOTDEV} (${SOURCE}) at ${MOUNTPOINT} read-only"

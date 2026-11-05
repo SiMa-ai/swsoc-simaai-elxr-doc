@@ -1,0 +1,14 @@
+[Unit]
+Description=Replay the data volume activation through udev
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=data.mount
+ConditionPathExists=/sbin/lvm
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/lvm lvchange --refresh -S lv_name=data
+
+[Install]
+WantedBy=sysinit.target
+

@@ -1,0 +1,153 @@
+/*
+ * SWUpdate description for the eLxr image on Modalix, boot A/B + LVM
+ * eMMC layout.
+ *
+ * One global A/B slot covers the whole chain (the tRoot firmware slot,
+ * the boot partition tRoot hands U-Boot, and thereby the rootfs). The
+ * bundle installs by collection (swupdate -e update,<mode>), one signed
+ * bundle serving three transaction shapes:
+ *
+ *   update,full     - tRoot slot image + boot fs + rootfs (the default).
+ *   update,firmware - the tRoot slot image only; reuses the OS already in
+ *                     the target slot.
+ *   update,os       - boot fs + rootfs only; reuses the tRoot already in
+ *                     the target slot.
+ *
+ * The one update script keys off what each collection stages: the
+ * boot0.be rawfile marks the firmware part, the swu-os-marker rawfile
+ * marks the OS part, and it installs whichever are present. The single
+ * simaai-trootctl switch-slot at the end flips the one slot regardless of
+ * which parts changed, arming the watchdog rollback until a healthy boot
+ * confirms. A partial update therefore pairs the new tier with whatever
+ * the other tier already holds in that slot - a developer flow; the
+ * fielded path ships full bundles.
+ *
+ *  - rootfs.ext4.gz: the same ext4 image the build writes to both A/B
+ *    slots (params.ext4), written raw to the inactive rootfs logical
+ *    volume through the /dev/rootpart symlink update_modalix.sh resolves
+ *    in preinst. postinst grows it to the volume and restores the slot's
+ *    label/UUID, the same way the build stamps a freshly flashed slot.
+ *  - boot.vfat.gz: the shared boot file system image (params.boot_image:
+ *    u-boot, kernel, dtbs, boot script), written raw to the inactive boot
+ *    partition via /dev/bootpart; postinst restores that slot's
+ *    label/volume id and writes the slot's own dm-table.env from the live
+ *    LVM geometry (the shared image carries no dm table - each boot
+ *    partition describes only its own slot).
+ *  - boot0.be: the tRoot A/B slot image, staged to /tmp and flashed to
+ *    the inactive tRoot slot by postinst via simaai-trootctl (HPI); a
+ *    pre-A/B tRoot rejects it safely and the update fails before any
+ *    activation.
+ *  - swu-os-marker: a zero-logic rawfile whose presence tells the script
+ *    the OS parts were staged (firmware-only bundles omit it).
+ *
+ * @@VERSION@@ and the @@<member>@@ hashes are stamped by the
+ * simaai.swupdate pasha module; signed installations require every
+ * artifact's sha256 in the signed description. The same member referenced
+ * from more than one collection carries that member's sha256 wherever it
+ * appears, so the build's dedup keeps the hashes consistent.
+ */
+software =
+{
+	version = "@@VERSION@@";
+	/*
+	 * Boards this image may be installed on, as efuse board IDs. The
+	 * list is stamped at build time from the troot package's
+	 * /boot/hwids.list, itself generated from tRoot's hwid.h - the
+	 * set tRoot supports for OTA (simulation/emulation boards and the
+	 * unfused id 0 excluded there). The board side comes from
+	 * /etc/hwrevision, derived at boot from /chosen/simaai,board-id.
+	 */
+	hardware-compatibility: [ @@HW_COMPAT@@ ];
+
+	update = {
+		full = {
+			images: (
+				{
+					filename = "boot.vfat.gz";
+					device = "/dev/bootpart";
+					type = "raw";
+					compressed = "zlib";
+					sha256 = "@@boot.vfat.gz@@";
+				},
+				{
+					filename = "rootfs.ext4.gz";
+					device = "/dev/rootpart";
+					type = "raw";
+					compressed = "zlib";
+					sha256 = "@@rootfs.ext4.gz@@";
+				}
+			);
+			files: (
+				{
+					filename = "boot0.be";
+					path = "/tmp/swupdate-boot0.be";
+					type = "rawfile";
+					sha256 = "@@boot0.be@@";
+				},
+				{
+					filename = "swu-os-marker";
+					path = "/tmp/swupdate.os";
+					type = "rawfile";
+					sha256 = "@@swu-os-marker@@";
+				}
+			);
+			scripts: (
+				{
+					filename = "update_modalix.sh";
+					type = "shellscript";
+					sha256 = "@@update_modalix.sh@@";
+				}
+			);
+		};
+		firmware = {
+			files: (
+				{
+					filename = "boot0.be";
+					path = "/tmp/swupdate-boot0.be";
+					type = "rawfile";
+					sha256 = "@@boot0.be@@";
+				}
+			);
+			scripts: (
+				{
+					filename = "update_modalix.sh";
+					type = "shellscript";
+					sha256 = "@@update_modalix.sh@@";
+				}
+			);
+		};
+		os = {
+			images: (
+				{
+					filename = "boot.vfat.gz";
+					device = "/dev/bootpart";
+					type = "raw";
+					compressed = "zlib";
+					sha256 = "@@boot.vfat.gz@@";
+				},
+				{
+					filename = "rootfs.ext4.gz";
+					device = "/dev/rootpart";
+					type = "raw";
+					compressed = "zlib";
+					sha256 = "@@rootfs.ext4.gz@@";
+				}
+			);
+			files: (
+				{
+					filename = "swu-os-marker";
+					path = "/tmp/swupdate.os";
+					type = "rawfile";
+					sha256 = "@@swu-os-marker@@";
+				}
+			);
+			scripts: (
+				{
+					filename = "update_modalix.sh";
+					type = "shellscript";
+					sha256 = "@@update_modalix.sh@@";
+				}
+			);
+		};
+	};
+}

@@ -1,0 +1,336 @@
+---
+install:
+# Before anything is built: an unrecognised ROOTFS_SLOTS would otherwise
+# surface as a null image size or a missing volume list several stages in.
+# 'a' populates slot A only, 'ab' populates both; an empty value is not the
+# same as unset, since the default only applies when the variable is absent.
+#
+# No echo carrying the diagnostic: run_shell logs every command in full both
+# before and after running it, so a message inside the command is noise on
+# every build that passes. A failure prints the stage name with the offending
+# value and then the command, which names the two accepted ones itself.
+- name: "Validate ROOTFS_SLOTS='${params.slots}'"
+  module: utils.run_shell
+  options:
+    commands:
+    - test "${params.slots}" = a || test "${params.slots}" = ab
+
+- name: "Remove stale loop device"
+  module: utils.run_shell
+  options:
+    commands:
+    # Deactivate first: logical volumes left over from an interrupted build
+    # hold the loop device open, so the detach below (and the losetup that
+    # image.raw does next) would fail with EBUSY.
+    - vgchange -an ${params.vg} 2>/dev/null || true
+    # Detach only what belongs to this build: an optional LOOP_CLAIM file,
+    # this build's own image left by an interrupted run, or a backing file
+    # that has been deleted. Anything else belongs to another build, so fail
+    # instead of detaching it.
+    # An unattached device reads as an empty backing and needs nothing.
+    - 'back="$(losetup -ln -O BACK-FILE ${params.disk} 2>/dev/null)"; case "$back" in "") ;; "${oc.env:LOOP_CLAIM,}"|"${params.image}"|*" (deleted)") losetup -d ${params.disk} 2>/dev/null || true ;; *) echo "${params.disk} is attached to $back, which is not ours; refusing to detach a live sibling" >&2; exit 1 ;; esac'
+
+- name: "Create raw image ${params.image}"
+  module: image.raw
+  options:
+    name: ${params.image}
+    size: ${oc.select:params.size_${params.slots}_${flavor}}
+
+- name: "Creating installer."
+  module: ${oc.env:BOOTSTRAP_MODULE, bootstrap.mmdebstrap}
+  options:
+    suite: trixie
+    target: ${params.source}
+    architecture: ${architecture}
+    # The overlay below writes files under /etc before any package is
+    # configured. When a package also ships one of those paths, dpkg sees a
+    # conffile it did not write and asks what to do; anything under /etc in a
+    # dh-built package is a conffile, so any overlap does this. The question
+    # goes to the build's stdin, which stalls the build outright when that is
+    # a terminal and silently picks a default when it is not.
+    #
+    # Answer it the way the build means either way: keep what the overlay put
+    # there. confdef takes the maintainer's default where one exists, confold
+    # keeps the installed file where it does not.
+    #
+    # mmdebstrap writes these to /etc/dpkg/dpkg.cfg.d/99mmdebstrap in the
+    # chroot and, unlike its hook options, leaves them there -- so this is
+    # build-time configuration that would otherwise ship. base.sh deletes the
+    # file once every package is configured, for the same reason it prunes the
+    # build-time apt repository: a board's own upgrades should not silently
+    # inherit how this build chose to answer.
+    dpkgopt:
+    - force-confdef
+    - force-confold
+    setup_hooks:
+    - 'sync-in overlay/elxr/ /'
+    - 'sync-in overlay/simaai/ /'
+    customize_hooks: ${oc.select:params.hooks_${flavor}}
+    packages: ${oc.select:params.packages_${flavor}}
+    mirrors:
+    - deb http://deb.debian.org/debian trixie main non-free-firmware
+    - deb http://deb.debian.org/debian trixie-updates main
+    - deb http://security.debian.org/debian-security trixie-security main
+    - deb [signed-by=/usr/share/keyrings/elxr-archive-keyring.gpg] https://mirror.elxr.dev/elxr bianca main
+    - ${oc.env:MIRROR_0,"deb [signed-by=${oc.env:KEY_PATH, /usr/share/keyrings/custom-repo.gpg}] ${oc.env:REPO, http://localhost}/deb/${oc.env:BUILD_TYPE, custom} ${params.codename} non-free"}
+    - ${oc.env:MIRROR_1,"deb [signed-by=/usr/share/keyrings/simaai-public.gpg] https://repo.sima.ai/elxr/deb/release ${params.codename} non-free"}
+
+- name: "Generate CPIO."
+  module: utils.run_shell
+  options:
+    commands:
+    - rm -Rvf ${params.cpio}.gz
+    - rm -Rvf ${params.cpio}
+    - mkdir -p $(dirname ${params.cpio})
+    - rm -Rvf ${params.rootfs}
+    - mkdir ${params.rootfs}
+    - tar -xf ${params.source} --numeric-owner --exclude=./dev/* -C ${params.rootfs}
+    - cd ${params.rootfs} && ln -s sbin/init init
+    # params.cpio is relative and every command runs in the invoking cwd
+    # (where gzip and simaai.bootloader expect the file); after the cd the
+    # archive must go to $OLDPWD or it lands inside the tree being archived.
+    - cd ${params.rootfs} && find . | sort | cpio --reproducible -o -H newc > "$OLDPWD/${params.cpio}"
+    - gzip -f -9 -n -c --rsyncable ${params.cpio} > ${params.cpio}.gz
+    # Only the .gz is consumed from here on (bootloader tftp publish); the
+    # raw archive is a gigabyte-plus of ephemeral storage per flavor.
+    - rm -f ${params.cpio}
+
+# Software bill of materials, in the CycloneDX format vulnerability scanners
+# ingest. Generated for every flavor because it lives in the shared
+# stages -- both the clean mmdebstrap build and a cached-base fast path
+# with the bootstrap stage stubbed out would run it.
+#
+# It reads the extracted tree rather than the image or the tarball, so it must
+# stay after the stage above that unpacks the tarball into ${params.rootfs};
+# nothing modifies the tree again (mke2fs -d below only reads it), so it needs
+# to be no earlier than this. debsbom parses var/lib/dpkg/status directly, so
+# no chroot and no qemu are involved, and the foreign architecture is passed
+# explicitly: 'auto' would otherwise resolve to the amd64 build host's.
+#
+# The SBoM covers the source packages the binaries came from as well, which is
+# what a scanner needs: Debian CVEs are filed against source packages, not
+# against the installed binary ones. Enrichment from the apt lists is not
+# available -- the image ships none -- so the Source
+# fields of the dpkg database are what the source components are built from.
+- name: "Generate CycloneDX SBoM ${params.sbom}"
+  module: utils.run_shell
+  options:
+    commands:
+    - >-
+      debsbom generate -t cdx -r ${params.rootfs} -o ${params.sbom}
+      --distro-arch ${architecture} --with-licenses
+      --distro-name ${name} --distro-version ${version}
+      --distro-supplier SiMa.ai
+      --add-meta-data flavor=${flavor}
+      --add-meta-data platform=${platform}
+      --add-meta-data codename=${codename}
+      --add-meta-data build=${oc.env:BUILD, 0}
+
+# Everything from here on writes the image through this device, so prove it
+# still backs this image before the first write.
+- name: "Verify ${params.disk} still backs ${params.image}"
+  module: utils.run_shell
+  options:
+    commands:
+    # No shell brace groups here: pasha's step logging format()s the command
+    # string, and a bare "{" reads as a format field and crashes the stage
+    # before it runs. "test || ! echo" fails the stage with the message
+    # printed, brace-free.
+    - 'back="$(losetup -ln -O BACK-FILE ${params.disk} 2>/dev/null)"; test "$back" = "${params.image}" || ! echo "${params.disk} is backed by $back, not ${params.image}; a concurrent build re-pointed it" >&2'
+
+# Three partitions: one boot file system per A/B slot and the LVM physical
+# volume. The u-boot copies that used to have raw partitions of their own are
+# now files on their slot's boot file system, and the rootfs slots are logical
+# volumes inside the container.
+#
+# 256MiB per boot file system. A slot holds ~30MiB today, most of it the
+# signed kernel FIT, so this leaves room to grow
+# without making the pair cost more than the single 512MiB boot partition it
+# replaces.
+- name: "Partitioning ${params.disk}."
+  module: installer.disk.parted
+  options:
+    slices:
+    # No flags on either boot partition. Nothing reads a marker to choose a
+    # slot: tRoot picks it and hands it to U-Boot, and a board that is told
+    # nothing falls back to the first partition, which is this one.
+    #
+    # In particular not parted's "boot", which on GPT is the EFI System
+    # Partition flag and would stamp an ESP type GUID on a partition that is
+    # not an ESP, inviting firmware and installers to treat it as one.
+    - name: boot.A
+      start: 1MiB
+      end: 257MiB
+      flags: []
+      id: ''
+    - name: boot.B
+      start: 257MiB
+      end: 513MiB
+      flags: []
+      id: ''
+    - name: lvm
+      start: 513MiB
+      end: 100%
+      flags: [ lvm ]
+      id: ''
+
+# No formatting stage for the boot partitions. Their file system arrives as a
+# whole image written by the bootloader stage, the same way the rootfs slots
+# get theirs, so a mkfs here would be overwritten work -- and harmful work,
+# because that write skips the payload's holes to keep the image sparse and
+# would leave this mkfs's metadata, boot sector and FAT copies included, sitting
+# in the gaps. The bootloader stage stamps the per-slot label and volume id
+# after the write.
+
+# Volumes are allocated in order, so 'data' with 100%FREE has to stay last.
+# --alloc contiguous (the module default) keeps each volume to a single
+# segment, which is what lets the rootfs slots be described by one linear
+# dm-init target.
+- name: "Creating logical volumes in ${params.vg}."
+  module: installer.disk.lvm
+  options:
+    device: ${params.lvmpart}
+    vg: ${params.vg}
+    volumes: ${oc.select:params.volumes_${params.slots}}
+    dm_init:
+      device: ${params.dm_pv}
+      name: rootfs
+      slots: ${oc.select:params.dmslots_${params.slots}}
+
+# Build the rootfs as a file system image, then write it to every slot this
+# build populates.
+#
+# mke2fs -d populates from a directory without mounting anything, so this needs
+# no mount and no privileged loop access for the file system itself, and it
+# produces the same artifact an update installs. That is the point: what a
+# freshly flashed slot holds and what an update writes to the inactive slot are
+# the same bytes, so the flashed path exercises the update path.
+#
+# Sized from the tree rather than from the volume: 20% slack plus 256M covers
+# metadata and leaves room to install into, while keeping the payload small
+# enough to be worth shipping. resize2fs then grows each slot's copy to fill
+# its volume, so the board still gets the whole slot.
+- name: "Create rootfs file system ${params.ext4}"
+  module: utils.run_shell
+  options:
+    commands:
+    - rm -f ${params.ext4}
+    - mke2fs -q -F -t ext4 -L ROOT -d ${params.rootfs} ${params.ext4} $(( $(du -sm ${params.rootfs} | cut -f1) * 12 / 10 + 256 ))m
+
+# One command group per populated slot, all from the same payload; the groups
+# and the constraints behind them are in image-params.yaml (wroot_*). An
+# A-only build writes slot A and leaves slot B to simaai-growlvm on the board,
+# which creates the volume, and to the first update, which fills it.
+- name: "Write rootfs to the populated A/B slots"
+  module: utils.run_shell
+  options:
+    commands: ${oc.select:params.write_${params.slots}}
+
+- name: "Install Bootloader"
+  module: simaai.bootloader
+  options:
+    disk: ${params.disk}
+    # One entry per A/B slot, in slot order. The stage builds one boot file
+    # system image and writes it to each, so either slot boots before the
+    # first update has run.
+    bootparts:
+    - ${params.bootpart_a}
+    - ${params.bootpart_b}
+    # Where that image is written. Beside the disk image rather than in the
+    # workspace, because it is also the artifact an update installs.
+    boot_image: ${params.boot_image}
+    # Per-slot identity (FAT volume ids), in slot order, stamped after the
+    # shared image is written. The label is derived from the slot letter
+    # (BOOT_A, BOOT_B).
+    bootuuids:
+    - ${params.bootuuid_a}
+    - ${params.bootuuid_b}
+    image: ${params.image}
+    arch: ${platform}
+    cpio: ${params.cpio}
+    tftp: ${params.tftp}
+
+# u-boot-${platform} ships troot_upgrade.efi outside /boot; copy it to the tftp
+# tree for the recovery image; the build fails without it.
+- name: "Stage troot_upgrade.efi for the recovery image."
+  module: utils.run_shell
+  options:
+    commands:
+    - if [ -e ${params.rootfs}/usr/lib/u-boot/${platform}/troot_upgrade.efi ]; then cp ${params.rootfs}/usr/lib/u-boot/${platform}/troot_upgrade.efi ${params.tftp}/; else echo "no troot_upgrade.efi in u-boot-${platform}; the recovery image needs it" >&2; exit 1; fi
+
+# The logical volumes hold the loop device open; deactivate the group before
+# the image is compressed and detached.
+- name: "Deactivating ${params.vg}."
+  module: installer.disk.lvm.teardown
+  options:
+    vg: ${params.vg}
+    # The kernel maps the active rootfs slot itself via dm-init, so keep
+    # LVM's autoactivation off every slot: activating one again on the
+    # running system would put a second device-mapper device over the same
+    # extents. 'data' stays autoactivated so fstab can mount it.
+    skip_activation: ${oc.select:params.skipact_${params.slots}}
+
+# The update payload is the same rootfs image the build wrote to the slots it
+# populated, so the flashed path and the update path install identical bytes.
+# It is built and shipped whatever ROOTFS_SLOTS says: the bundle a board takes
+# does not depend on how many slots its image arrived with.
+- name: "Prepare SWUpdate payloads."
+  module: utils.run_shell
+  options:
+    commands:
+    - gzip -f -9 -n -c --rsyncable ${params.ext4} > ${params.ext4gz}
+    - gzip -f -9 -n -c --rsyncable ${params.boot_image} > ${params.boot_imagegz}
+    # The tRoot A/B slot image, packaged by the troot deb next to the
+    # full-flash blob; this is what the update's postinst hands to
+    # simaai-trootctl upgrade.
+    - cp ${params.rootfs}/boot/Release/boot0.be ${params.boot0}
+
+- name: "Generate SWUpdate."
+  module: simaai.swupdate
+  options:
+    description: ${oc.env:CURRENT_DIR}/configs/images/files/sw-description
+    files:
+    # Fixed member names: sw-description references them literally, so the
+    # bundle layout does not depend on the image name or version.
+    - src: ${params.ext4gz}
+      name: rootfs.ext4.gz
+    - src: ${params.boot_imagegz}
+      name: boot.vfat.gz
+    - src: ${params.boot0}
+      name: boot0.be
+    # Zero-logic marker: its presence in a collection tells the update
+    # script the OS parts were staged (firmware-only bundles omit it).
+    - ${oc.env:CURRENT_DIR}/configs/images/files/swu-os-marker
+    - ${oc.env:CURRENT_DIR}/configs/images/files/update_modalix.sh
+    version: ${version}
+    # Boards the bundle may install on, generated by the troot package
+    # from hwid.h; the module stamps them into @@HW_COMPAT@@.
+    hwids: ${params.rootfs}/boot/hwids.list
+    # Signing key/cert: cib build sets SWU_SIGNING_KEY / SWU_SIGNING_CERT to a
+    # throwaway pair, and cib sign re-signs the bundle with yours. The defaults
+    # apply only outside cib. No key material lives in this repo.
+    key: ${oc.env:SWU_SIGNING_KEY, /opt/swupdate-keys/dev.pem}
+    cert: ${oc.env:SWU_SIGNING_CERT, /opt/swupdate-keys/dev.pub}
+    output: ${params.swu}
+
+# Everything below has served its purpose: the source tarball was unpacked
+# into the rootfs tree, the tree fed mke2fs / the boot0 copy / the hwid
+# list, the raw ext4 and boot file systems were written to their slots and
+# gzipped, and the gzipped payloads are packed inside the .swu. Together
+# they hold ~15 GiB of ephemeral storage per flavor. Free them before the
+# compress stage's own peak. The shipped artifacts (.img.gz, .swu, *-boot0.be, the
+# SBoM, the tftp tree) are untouched.
+- name: "Drop consumed build intermediates"
+  module: utils.run_shell
+  options:
+    commands:
+    - rm -f ${params.source}
+    - rm -rf ${params.rootfs}
+    - rm -f ${params.ext4} ${params.ext4gz}
+    - rm -f ${params.boot_image} ${params.boot_imagegz}
+
+- name: "Compress image ${params.image}"
+  module: image.compress
+  options:
+    name: ${params.image}
+    compression: gzip

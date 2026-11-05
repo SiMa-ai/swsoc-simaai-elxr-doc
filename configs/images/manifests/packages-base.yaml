@@ -1,0 +1,2 @@
+---
+systemd-boot dracut-core uefi-ext4 ca-certificates elxr-archive-keyring vim sudo net-tools openssh-client openssh-server procps less dbus polkitd pkexec curl wget systemd-resolved cloud-guest-utils xterm

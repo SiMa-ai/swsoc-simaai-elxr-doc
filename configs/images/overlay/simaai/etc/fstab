@@ -1,0 +1,13 @@
+# <file system>    <dir>        <type>    <options>                                <makeimg args>
+# Root is the active rootfs logical volume, mapped by the kernel through
+# dm-init (dm-mod.create=) before any LVM userspace runs -- the board boots
+# without an initramfs. The mapping is always named "rootfs", whichever slot
+# it points at, so this entry is slot-agnostic.
+/dev/mapper/rootfs /            ext4      defaults 0 0
+# /boot is deliberately absent. There is one boot file system per A/B slot, so
+# a static entry would have to name a slot and would mount the wrong one after
+# a flip. simaai-mount-boot mounts the slot the board actually booted from,
+# read-only, using the device U-Boot passes on the kernel command line.
+# Persistent data volume: survives every A/B update. nofail so a board whose
+# volume group has not been provisioned still reaches a login prompt.
+LABEL=data         /data        ext4      defaults,nofail 0 2

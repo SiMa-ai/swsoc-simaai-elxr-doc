@@ -1,0 +1,15 @@
+# eLxr ships substitute kernel-header packages for its reference boards --
+# linux-imx-libc-dev (NXP i.MX) and linux-arm64-libc-dev (generic arm64),
+# both 6.12-based -- which Provides/Conflicts/Replaces linux-libc-dev.
+# Given an arch-qualified dependency (linux-libc-dev:arm64) apt prefers
+# such a Multi-Arch: foreign provider over the real SiMa.ai linux-libc-dev,
+# silently putting foreign 6.12 headers on a Modalix image and blocking
+# the 6.18 ones; masking only one substitute makes apt walk to the next.
+# Neither is ever a valid candidate here, whatever dependency shape asks.
+Package: linux-imx-libc-dev
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-arm64-libc-dev
+Pin: release *
+Pin-Priority: -1

@@ -1,0 +1,211 @@
+#!/bin/bash
+#
+# simaai-growlvm - grow the LVM container to fill the boot media, holding back
+# the capacity an unpopulated rootfs slot will need.
+#
+# The shipped image spans the boot partitions, the rootfs slots it populates
+# and a small data volume, so it stays a compact artifact. On the flashed
+# board the eMMC is much larger, and that extra space has to be handed to the
+# data volume, which is the one that holds everything persistent.
+#
+# An image built with slots: a populates slot A only and carries no volume for
+# slot B at all, which is what makes it roughly half the size. The inactive
+# slot's capacity is claimed here, before a single extent reaches data: data's
+# file system is grown online and cannot be shrunk back, so an extent given
+# away now is gone for good and an update would find no room for the slot it
+# has to write. The new volume is sized from the slot that does exist, since
+# an update writes one slot's payload into the other and they have to match,
+# so no slot size has to be kept in step with the image build here.
+#
+# This replaces elxr-growfs for the "Boot A/B + LVM" layout. elxr-growfs
+# grows the partition that / lives on, and refuses outright when it finds a
+# block device that is not a partition -- with this layout / is a logical
+# volume, so it would fail on the first check.
+#
+# Populated rootfs slots are deliberately left alone. Growing one of them
+# would desynchronise it from the dm-init table the boot script hands the
+# kernel (that table carries a fixed offset and length), and the two slots
+# must stay the same size for an update to be able to write either one.
+#
+# Idempotent: once both slots exist and the container spans the device, a
+# second run finds no free extents and exits without changes.
+set -eu
+
+log() { echo "simaai-growlvm: $*"; }
+die() { echo "simaai-growlvm: error: $*" >&2; exit 1; }
+
+# The rootfs A/B slots by volume name. An image built with ROOTFS_SLOTS=ab
+# brings both; an A-only image leaves the second one to this script.
+SLOT_LVS="rootfs.A rootfs.B"
+
+# The boot medium's PV is the running root's backing partition: / is an
+# overlayfs on an ordinary boot, so the real root device comes from the
+# kernel's root=, and its dm slave is the partition the LVM container
+# lives on. Every LVM command below is scoped to that PV with --devices,
+# because "exactly one volume group" is only true of the boot medium: a
+# stray second group (an old install on NVMe/SD, or the same image on
+# two media) sorts first and an unscoped discovery would grow and manage
+# THAT group instead of the booted one.
+rootdev=$(findmnt -no SOURCE / 2>/dev/null || :)
+case "${rootdev}" in
+/dev/*) : ;;
+*) rootdev=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^root=//p' | head -1) ;;
+esac
+dmname=${rootdev#/dev/}
+# A netbooted or cpio minimal image has no logical volume behind /.
+[ -d "/sys/block/${dmname}/dm" ] || { log "/ (${rootdev:-none}) is not on a logical volume, nothing to grow"; exit 0; }
+slave=
+[ -d "/sys/block/${dmname}/slaves" ] &&
+	slave=$(ls "/sys/block/${dmname}/slaves" | head -1)
+[ -n "${slave}" ] || die "cannot find the boot medium behind '${rootdev}'"
+PV=/dev/${slave}
+
+# Discover the volume group - from the boot medium's PV alone, which
+# carries exactly one. Its name carries the image flavour, so never
+# hard-code it.
+VG=$(vgs --devices "${PV}" --noheadings -o vg_name 2>/dev/null | tr -d ' ')
+[ -n "${VG}" ] || die "no volume group found on ${PV}"
+
+# Refuse to reshape anything while a same-named twin from ANOTHER medium
+# is live. With the same image on two media the group names collide, and
+# if the running system mounted the other medium's copy, an lvextend here
+# RELOADS that live
+# mapping onto this PV's extents - retargeting a mounted file system's
+# backing device mid-flight. Both copies being freshly identical is the
+# only reason that ever appears to work; diverged data would be
+# corrupted. The scoped overlay pre-init mounts the right copy on the
+# next boot, and this run is then clean - so failing loudly here is the
+# safe and self-resolving move.
+pvmm=$(lsblk -dno MAJ:MIN "$(realpath "${PV}")" | tr -d ' ')
+for dmn in /dev/mapper/"${VG}"-*; do
+	[ -b "${dmn}" ] || continue
+	depmm=$(dmsetup table "$(basename "${dmn}")" 2>/dev/null |
+		awk '$3 == "linear" {print $4; exit}')
+	[ -n "${depmm}" ] && [ "${depmm}" != "${pvmm}" ] &&
+		die "active volume ${dmn} is backed by ${depmm}, not the" \
+		    "boot medium ${PV} (${pvmm}); a same-named volume group" \
+		    "on another medium is live - reboot so the boot medium's" \
+		    "copy is the one mounted, then this will run clean"
+done
+
+DATA_LV="${VG}/data"
+lvs --devices "${PV}" "${DATA_LV}" >/dev/null 2>&1 || die "${DATA_LV} does not exist"
+
+# An overlay boot activates this volume group in simaai-overlay-init --
+# vgchange --sysinit as PID 1, before udev exists -- so udev never makes
+# the /dev/${VG}/* and /dev/mapper/* aliases for the volumes activated
+# there, and its later coldplug replay cannot reconstruct device-mapper
+# links for devices activated without udev sync. Recreate them (a no-op
+# when they already exist), or the resize at the end fails on every boot
+# with "no such file or directory" on /dev/${DATA_LV}.
+vgmknodes --devices "${PV}" "${VG}"
+
+# Which slots the flashed image brought a volume for, and which are still
+# owed one.
+present=""
+missing=""
+for lv in ${SLOT_LVS}; do
+	if lvs --devices "${PV}" "${VG}/${lv}" >/dev/null 2>&1; then
+		present="${present}${present:+ }${lv}"
+	else
+		missing="${missing}${missing:+ }${lv}"
+	fi
+done
+[ -n "${present}" ] || die "${VG} holds no rootfs slot volume at all"
+
+# Extents to hold back for the slots that have no volume, sized from one that
+# does. Both values come out of LVM in bytes and an LV is always a whole
+# number of extents, so the division is exact.
+slot_extents=0
+reserve=0
+if [ -n "${missing}" ]; then
+	peer=${present%% *}
+	pe_bytes=$(vgs --devices "${PV}" --noheadings --units b --nosuffix -o vg_extent_size "${VG}" | tr -d ' ')
+	lv_bytes=$(lvs --devices "${PV}" --noheadings --units b --nosuffix -o lv_size "${VG}/${peer}" | tr -d ' ')
+	slot_extents=$(awk -v l="${lv_bytes:-0}" -v p="${pe_bytes:-0}" \
+		'BEGIN { if (p > 0) printf "%d", l / p; else print 0 }')
+	[ "${slot_extents}" -gt 0 ] || die "cannot size ${VG}/${peer}"
+	for lv in ${missing}; do
+		reserve=$((reserve + slot_extents))
+	done
+	log "holding back ${reserve} extents for ${missing}, sized from ${peer}"
+fi
+
+# Grow the partition to the end of the disk. growpart exits 1 when there is
+# nothing to do, the normal state after the first boot, and 2 on a failure.
+PV_NODE=$(realpath "${PV}")
+PV_MAJMIN=$(lsblk -dno MAJ:MIN "${PV_NODE}" | tr -d ' ')
+PART_NUM=$(cat "/sys/dev/block/${PV_MAJMIN}/partition") ||
+	die "${PV_NODE} is not a partition"
+DISK=$(lsblk -dno PKNAME "${PV_NODE}")
+[ -n "${DISK}" ] || die "cannot determine the disk holding ${PV_NODE}"
+
+rc=0
+growpart "/dev/${DISK}" "${PART_NUM}" || rc=$?
+case "${rc}" in
+0)	log "grew /dev/${DISK} partition ${PART_NUM}"
+	partprobe "/dev/${DISK}" || true ;;
+1)	log "partition ${PART_NUM} on /dev/${DISK} already spans the disk" ;;
+*)	die "growpart /dev/${DISK} ${PART_NUM} failed (exit ${rc})" ;;
+esac
+
+# Let LVM see the larger partition, then share out the new extents.
+pvresize --devices "${PV}" "${PV}"
+
+FREE=$(vgs --devices "${PV}" --noheadings -o vg_free_count "${VG}" | tr -d ' ')
+FREE=${FREE:-0}
+
+if [ "${reserve}" -gt "${FREE}" ]; then
+	die "${VG} has ${FREE} free extents, but ${missing} needs ${reserve};" \
+	    "refusing to hand ${DATA_LV} space an update cannot do without"
+fi
+
+grow=$((FREE - reserve))
+if [ "${grow}" -gt 0 ]; then
+	log "extending ${DATA_LV} by ${grow} extents"
+	lvextend --devices "${PV}" -l "+${grow}" "${DATA_LV}"
+else
+	log "no free extents for ${DATA_LV}"
+fi
+
+# The reserve is claimed after data's extension so that the extension stays
+# adjacent to what data already had -- data is allocated contiguously and
+# cannot be extended across another volume. That leaves the new slots at the
+# end of the container, in what is now a single free run, so each one is a
+# single linear segment: the shape the dm-init table an update writes can
+# describe.
+#
+# It is claimed before the file system is grown, so that a data volume this
+# cannot resize -- one that failed to mount, say -- does not take the slot an
+# update needs down with it.
+#
+# Activation-skipped like the slots the build creates: the kernel maps the
+# active slot itself through dm-init, and letting LVM autoactivate one as
+# well would put a second device-mapper device over the same extents. An
+# update brings the slot up on demand with 'lvchange -ay -K'.
+for lv in ${missing}; do
+	log "creating ${VG}/${lv} (${slot_extents} extents) for the inactive slot"
+	lvcreate --devices "${PV}" -y --alloc contiguous --setactivationskip y \
+		-l "${slot_extents}" -n "${lv}" "${VG}"
+
+	# lvcreate cannot zero a volume it does not activate, and a board
+	# reflashed with a smaller image leaves the previous installation's
+	# rootfs sitting in exactly these extents -- where it would advertise
+	# itself as a populated slot, with a label and a version, to anything
+	# that asks what the board would fall back to. Wipe the head so the
+	# slot reads as what it is: reserved and empty until an update fills
+	# it. The first mebibyte covers the ext4 superblock at 1024 and every
+	# other signature blkid looks for.
+	lvchange --devices "${PV}" -K -ay "${VG}/${lv}"
+	dd if=/dev/zero of="/dev/${VG}/${lv}" bs=1M count=1 conv=fsync status=none
+	lvchange --devices "${PV}" -an "${VG}/${lv}"
+done
+
+# Last, because it is the one step that depends on the data volume being
+# healthy. Unconditional and idempotent (a file system already the right size
+# is left alone), so it also finishes the job for a run that extended the
+# volume but was cut short before the file system followed. /data is mounted
+# by now; ext4 grows online.
+resize2fs "/dev/${DATA_LV}"
+
+log "done"

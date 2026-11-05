@@ -1,0 +1,16 @@
+[Unit]
+Description=Derive /etc/hwrevision from the efuse board ID
+# Before basic.target so the file exists before anything that might start
+# an update - swupdate reads /etc/hwrevision at startup.
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=basic.target
+ConditionPathIsReadWrite=/etc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/simaai-hwrevision
+RemainAfterExit=yes
+
+[Install]
+WantedBy=basic.target

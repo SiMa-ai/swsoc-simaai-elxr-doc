@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# simaai-hwrevision - derive /etc/hwrevision from the efuse board ID.
+#
+# swupdate checks a bundle's hardware-compatibility list against
+# /etc/hwrevision ("<board> <revision>"). The revision is the efuse board
+# ID, published by U-Boot as /chosen/simaai,board-id (the only place the
+# running system can learn it). Written every boot so a board that is
+# re-fused, or a rootfs moved between boards, never carries a stale ID.
+#
+# An absent property is not an error: an older U-Boot does not publish it.
+# Leave no file rather than guess - swupdate then refuses hardware-bound
+# bundles instead of accepting them blindly, and -H remains the operator
+# override.
+set -eu
+
+PROP=/proc/device-tree/chosen/simaai,board-id
+
+if [ ! -e "${PROP}" ]; then
+	echo "simaai-hwrevision: no ${PROP}; leaving /etc/hwrevision absent"
+	rm -f /etc/hwrevision
+	exit 0
+fi
+
+id=$(od -An -tx1 "${PROP}" | tr -d ' \n')
+printf 'modalix 0x%08x\n' "0x${id}" > /etc/hwrevision
+echo "simaai-hwrevision: $(cat /etc/hwrevision)"

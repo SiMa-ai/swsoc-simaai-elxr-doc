@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# simaai-mount-boot - mount the active slot's boot file system at /boot.
+#
+# The layout gives every A/B slot a boot file system of its own, so there is no
+# single device or label that /boot can name in fstab: after a slot flip the
+# static entry would mount the other slot's partition. U-Boot knows which one
+# it was started from, and passes it on the kernel command line as
+# simaai.bootdev=/dev/mmcblk0pN.
+#
+# Mounted read-only. Nothing on a running system needs to write here -- the
+# update engine mounts the *inactive* slot's partition read-write when it
+# installs -- and a read-only mount guarantees the file system tRoot and
+# U-Boot will read at the next boot is exactly what the build (or the last
+# update) wrote.
+#
+# Absent simaai.bootdev is not an error: an older U-Boot does not pass it. Skip
+# rather than guess, because mounting the wrong slot would point the update
+# engine at the partition currently in use.
+set -eu
+
+log() { echo "simaai-mount-boot: $*"; }
+
+BOOTDEV=
+for arg in $(cat /proc/cmdline); do
+	case "${arg}" in
+	simaai.bootdev=*) BOOTDEV="${arg#simaai.bootdev=}" ;;
+	esac
+done
+
+if [ -z "${BOOTDEV}" ]; then
+	log "no simaai.bootdev on the kernel command line; leaving /boot unmounted"
+	exit 0
+fi
+
+if [ ! -b "${BOOTDEV}" ]; then
+	log "error: ${BOOTDEV} is not a block device" >&2
+	exit 1
+fi
+
+if findmnt -rno TARGET /boot >/dev/null 2>&1; then
+	log "/boot is already mounted"
+	exit 0
+fi
+
+mkdir -p /boot
+mount -o ro "${BOOTDEV}" /boot
+log "mounted ${BOOTDEV} at /boot read-only"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Mount the active A/B slot's U-Boot environment at /var/uboot
+# A .mount unit cannot express this: What= is static, and which partition holds
+# the environment is known only from the kernel command line U-Boot passed.
+# Nothing in early boot reads the environment -- it is a userspace convenience,
+# consulted by fw_printenv on demand -- so this runs with the ordinary local
+# file systems rather than ahead of them.
+After=local-fs.target
+ConditionPathExists=/proc/cmdline
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/simaai-mount-uboot-env
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

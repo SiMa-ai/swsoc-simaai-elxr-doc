@@ -1,0 +1,7 @@
+Package: *
+Pin: origin repo.sima.ai
+Pin-Priority: 950
+
+Package: *
+Pin: origin localhost
+Pin-Priority: 980

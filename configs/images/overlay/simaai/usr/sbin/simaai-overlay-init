@@ -1,0 +1,171 @@
+#!/bin/sh
+#
+# simaai-overlay-init - compose the data volume as an overlay over / before
+# init runs.
+#
+# The board boots without an initramfs, so there is no early userspace in which
+# to build an overlay: by the time systemd is running, / is already the mount
+# it would have to replace. This script therefore runs as PID 1 -- U-Boot puts
+# init=/usr/sbin/simaai-overlay-init on the command line -- stacks the data
+# volume over the rootfs, pivots into the result and hands over to the real
+# init. U-Boot passes that argument by default, so this runs on every ordinary
+# boot; "setenv rootoverlay 0" at the U-Boot prompt leaves it off for one boot.
+#
+# Running as PID 1 on every boot is the risk worth taking seriously, so every
+# step that can fail falls back to exec'ing the real init on the plain rootfs:
+# a board that boots without its overlay is a bug to chase, where one that does
+# not boot is a board someone has to go and touch. The point of no return is
+# pivot_root, and nothing after it can fail.
+#
+# Those fallbacks are what the default rests on, so treat them as load-bearing
+# rather than as belt and braces. There is no second line of defence behind
+# them: "setenv rootoverlay 0" at the U-Boot prompt turns the overlay off for
+# one boot only, so a power cycle brings it straight back, and recovering a
+# board this script cannot bring up means reaching that prompt every time. That is the trade for having
+# local changes survive an A/B update without anyone having to ask for it.
+#
+# Two things are not obvious:
+#
+#  - overlayfs is a module in this kernel (CONFIG_OVERLAY_FS=m), so it has to
+#    be loaded before the mount. The rootfs carrying /lib/modules is already
+#    mounted, so this works, but building it in removes the step entirely.
+#
+#  - dm-init creates only the rootfs mapping. The data volume is a logical
+#    volume that nothing has activated at this point: LVM's activation runs
+#    under systemd, which has not started. So this has to activate the volume
+#    group itself, which means every ordinary boot now parses LVM metadata
+#    before init runs -- worth knowing, because nothing did before the overlay
+#    became the default.
+#
+# The upper and work directories are subdirectories of the data volume rather
+# than the volume itself, because overlayfs rejects a workdir underneath
+# upperdir ("workdir and upperdir must be separate subtrees" in
+# fs/overlayfs/super.c), and every directory on the volume is underneath its
+# root. The volume is still the writable layer; only workdir's placement is
+# constrained.
+
+set -u
+
+REAL_INIT=/sbin/init
+NEWROOT=/mnt
+# Where pivot_root parks the old root inside the new one. It stays mounted --
+# overlayfs still holds the lower layer -- so it must not sit on a path anything
+# else claims. /mnt in particular is the NFS mount point (the NetworkManager
+# dispatcher automounts the board's NFS share there), so parking the old root on
+# /mnt left the automount nowhere to land. A directory of its own keeps the
+# pristine rootfs reachable without taking /mnt.
+OLDROOT=oldroot
+UPPER=overlay/upper
+WORK=overlay/work
+
+log() {
+	echo "simaai-overlay-init: $*" >/dev/kmsg 2>/dev/null ||
+		echo "simaai-overlay-init: $*" >&2
+}
+
+# Boot normally rather than not at all.
+fallback() {
+	log "$* -- booting without the overlay"
+	exec "${REAL_INIT}"
+}
+
+# /proc and /sys for modprobe and for reading back what is mounted. The kernel
+# mounts devtmpfs on /dev by itself (CONFIG_DEVTMPFS_MOUNT), so the logical
+# volume nodes appear without udev. /run has to be a tmpfs before anything can
+# be created under it, because the rootfs may be mounted read-only.
+mount -t proc proc /proc 2>/dev/null || :
+mount -t sysfs sys /sys 2>/dev/null || :
+mount -t tmpfs tmpfs /run 2>/dev/null || :
+
+if ! grep -qw overlay /proc/filesystems 2>/dev/null; then
+	modprobe overlay 2>/dev/null || :
+fi
+grep -qw overlay /proc/filesystems 2>/dev/null ||
+	fallback "overlayfs is not available"
+
+# Activate only the boot medium's volume group. / is still the plain dm-init
+# rootfs here (the overlay is what this script is about to build), so its dm
+# slave is the partition the LVM container lives on; --devices scoped to it
+# keeps any stray second group - an old install on NVMe/SD, or the same image
+# on two media - from being activated at all. That matters because the *-data
+# glob below takes the first match: an older build's group sorts first, and
+# its stale data volume would silently become this boot's writable layer
+# (stale hostname, stale /etc - seen on one board). If the scoping
+# cannot be established, activate everything as before: booting with a
+# possibly-wrong overlay still beats not booting.
+#
+# --sysinit is what makes this usable before systemd: it tells LVM not to wait
+# for udev to create the device nodes and to skip the daemon it would otherwise
+# talk to.
+bootpv=
+rootdev=$(tr ' ' '\n' </proc/cmdline 2>/dev/null | sed -n 's/^root=//p' | head -1)
+if [ -n "${rootdev}" ] && [ -d "/sys/block/${rootdev#/dev/}/slaves" ]; then
+	slave=$(ls "/sys/block/${rootdev#/dev/}/slaves" 2>/dev/null | head -1)
+	[ -n "${slave}" ] && bootpv=/dev/${slave}
+fi
+if [ -z "${bootpv}" ] ||
+   ! lvm vgchange --devices "${bootpv}" --activate y --sysinit \
+	>/dev/null 2>&1; then
+	log "activating all volume groups (no boot-PV scope for '${rootdev}')"
+	lvm vgchange --activate y --sysinit >/dev/null 2>&1 ||
+		fallback "could not activate the volume group"
+fi
+
+# The data volume, by the name LVM gives it. Dashes in a name are doubled in
+# /dev/mapper, but neither the group nor the volume has one.
+DATA=
+for candidate in /dev/mapper/*-data; do
+	if [ -b "${candidate}" ]; then
+		DATA="${candidate}"
+		break
+	fi
+done
+[ -n "${DATA}" ] || DATA=$(blkid -L data 2>/dev/null || :)
+[ -n "${DATA}" ] && [ -b "${DATA}" ] ||
+	fallback "no data volume to use as the upper layer"
+
+mkdir -p /run/data 2>/dev/null || fallback "could not create /run/data"
+mount "${DATA}" /run/data || fallback "could not mount ${DATA}"
+
+mkdir -p "/run/data/${UPPER}" "/run/data/${WORK}" ||
+	fallback "could not create the overlay directories on ${DATA}"
+
+mount -t overlay overlay \
+	-o "lowerdir=/,upperdir=/run/data/${UPPER},workdir=/run/data/${WORK}" \
+	"${NEWROOT}" ||
+	fallback "could not stack the overlay on ${NEWROOT}"
+
+# Everything below writes through the overlay, so it lands on the data volume.
+#
+# The api file systems move rather than being left behind: systemd would mount
+# its own, but moving them keeps one of each instead of shadowing the ones this
+# script needs. /run stays where it is -- the overlay's upper and work
+# directories live under it, and systemd mounts a fresh /run in the new root.
+mkdir -p "${NEWROOT}/data" "${NEWROOT}/${OLDROOT}" ||
+	fallback "could not prepare the new root"
+mount --move /run/data "${NEWROOT}/data" ||
+	fallback "could not move the data volume into the new root"
+for api in /dev /proc /sys; do
+	mount --move "${api}" "${NEWROOT}${api}" 2>/dev/null || :
+done
+
+# Past this point there is no going back: the old root moves under /${OLDROOT}
+# in the new one, and a failure here cannot fall back to it.
+cd "${NEWROOT}" || fallback "could not enter the new root"
+pivot_root . "${OLDROOT}" || fallback "pivot_root failed"
+
+# The parked old root is the overlay's live lower layer, and it would stay
+# reachable read-write. Writing a lower file system while an overlay is
+# stacked on it is undefined behaviour in the kernel ("Changes to underlying
+# filesystems" in Documentation/filesystems/overlayfs.rst), and a writer that
+# lands here by accident thinks it is writing scratch space, not the pristine
+# rootfs. A bind-remount marks only this mountpoint read-only (MNT_READONLY;
+# the superblock and the overlay's own use of the lower are untouched), so
+# such a writer now gets a clean EROFS instead. Relative path on purpose:
+# between pivot_root and chroot the process root still points at the old
+# root, only cwd is the new one. Best-effort - nothing after pivot_root may
+# fail the boot.
+mount -o remount,ro,bind "./${OLDROOT}" 2>/dev/null || :
+
+log "overlay active: ${DATA} over the rootfs"
+exec chroot . "${REAL_INIT}"

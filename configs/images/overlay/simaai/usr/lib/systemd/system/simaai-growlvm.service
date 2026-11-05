@@ -1,0 +1,16 @@
+[Unit]
+Description=Grow the LVM data volume, reserving the inactive rootfs slot
+# Runs after /data is mounted and resizes it online -- ext4 supports growing a
+# mounted file system, and waiting avoids the ordering subtleties of getting in
+# front of local-fs.target while still needing udev and LVM autoactivation to
+# have brought the volume up.
+After=local-fs.target lvm2-monitor.service
+ConditionPathExists=/sbin/lvm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/simaai-growlvm
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

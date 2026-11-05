@@ -1,0 +1,269 @@
+---
+source: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}.tar.gz
+image: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}.img
+# Flavor-scoped directory, shared basename: palette and securepalette
+# build in the same cwd in parallel, and a shared relative path made
+# one flavor's cpio/gzip race the other's ("file size changed while
+# zipping", cross-flavor installer content). The basename is what the
+# bootloader publishes into the tftp tree, so it must not change.
+cpio: ${name}-installer/simaai-image-palette-${platform}.cpio
+rootfs: $WORKSPACE_RS/${name}-${architecture}
+# Standalone rootfs file system, built once and written to every A/B slot. It
+# sits beside the image rather than in the workspace because it is also the
+# payload an update writes to the inactive slot, so the update artifact and the
+# slot contents of a freshly flashed board come from the same bytes.
+ext4: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}.ext4
+# The same payload gzipped, as the SWUpdate bundle ships it.
+ext4gz: ${.ext4}.gz
+# Standalone boot file system (vfat - tRoot reads it with its FAT32-only
+# reader), built once from the staged artifacts and written to both boot
+# partitions, and the payload an update writes to the inactive one. The key
+# is named type-independently (the boot payload has a single variant, unlike
+# the rootfs cpio/ext4 pair) and matches the bootloader stage's own
+# 'boot_image' option; the file itself keeps its truthful .vfat extension.
+boot_image: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}-boot.vfat
+# The same boot payload gzipped, as the SWUpdate bundle ships it.
+boot_imagegz: ${.boot_image}.gz
+# The tRoot A/B slot image the bundle ships, taken from the rootfs' troot
+# package (both tRoot slots boot the same ciphertext, so one image serves
+# either slot); written by simaai-trootctl from the update's postinst.
+boot0: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}-boot0.be
+tftp: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${platform}-tftp-boot-${flavor}
+disk: ${oc.env:LOOPDEV,${loopdev:}}
+# SWUpdate bundle assembled from the shared rootfs payload.
+swu: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}.swu
+# CycloneDX software bill of materials for the image, generated from the
+# rootfs' dpkg database and shipped as a build artifact (the input format of
+# vulnerability scanners). The .cdx.json extension is the one
+# debsbom appends itself, so it is spelled out here and debsbom leaves the
+# name alone; anything else and it would write "<name>.swu.cdx.json"-style
+# double extensions.
+sbom: ${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}}/${name}-${version}-${codename}-${architecture}.cdx.json
+
+# "Boot A/B + LVM" eMMC layout: three GPT partitions, one
+# vfat boot file system per slot and a single LVM physical volume holding the
+# rootfs A/B slots plus data.
+#
+# A boot file system per slot rather than one shared file system with a
+# directory per slot: a shared file system is a shared failure domain, so an
+# interrupted write while updating the inactive slot could take the active
+# slot's boot artifacts with it, which is the one thing A/B exists to prevent.
+#
+# References to keys defined in this file are relative (${.key}), because the
+# values are read back under two different resolution roots. A stage option
+# such as "device: ${params.lvmpart}" resolves against the stages config,
+# whose root holds a 'params' node; module code such as bootloader.py's
+# self.context.params.rootpart_a gets the params node handed over as its own
+# root, with no 'params' key above it. So a bare ${disk} fails in the first
+# case and ${params.disk} fails in the second, both with
+# InterpolationKeyError. Relative interpolation resolves against the enclosing
+# node either way. Keys carrying an invocation value (name, version, flavor
+# and friends) are exempt: those exist at both roots, which is why the plain
+# ${flavor} below is fine.
+bootpart_a: ${.disk}p1
+bootpart_b: ${.disk}p2
+lvmpart: ${.disk}p3
+
+# Volume group name. Nothing on the board depends on the name -- the kernel
+# maps the active rootfs through dm-init and everything else goes by file
+# system label -- so runtime tooling discovers it with 'vgs'.
+#
+# Flavour- and container-suffixed: device-mapper names and /dev/<vg> are
+# shared by every container on the host, so a fixed name collides with a
+# concurrent build or with the leftovers of a dead one ("/dev/<vg>: already
+# exists in filesystem"). ${vgsuffix:} derives the suffix from the container
+# id in /etc/hostname; VG_SUFFIX overrides it.
+vg: simaai_${flavor}${oc.env:VG_SUFFIX,${vgsuffix:}}
+
+# Physical volume path on the flashed board, used only for the reference
+# dm-init table recorded in the boot partitions. The boot script derives the
+# real one from ${devnum}.
+dm_pv: /dev/mmcblk0p3
+
+# Which rootfs slots the build populates: "a" or "ab". Set with ROOTFS_SLOTS
+# ("a" when unset; cib build sets it from image.yaml, default "ab"); the
+# stages validate the value before anything is built.
+#
+# "a" writes slot A and does not allocate slot B at all, so the artifact
+# carries one rootfs copy instead of two -- for the palette flavors that
+# halves it, and with it the download, the decompression and the flash. The
+# inactive slot is not lost: simaai-growlvm creates it at slot A's size on
+# first boot, before any of the grown eMMC reaches the data volume, so an
+# update always finds a full-size slot to write and data can never hold the
+# space that slot needs. Slot B carries no file system until that update, so
+# it cannot be booted before one -- nothing tries to, because tRoot only arms
+# a rollback to a slot an update has populated.
+#
+# "ab" writes the same payload to both slots, so a freshly flashed board can
+# boot either one and a slot switch can be exercised before any update has
+# run. Only the shipped image differs between the two: the update payload is
+# the same bytes either way.
+slots: ${oc.env:ROOTFS_SLOTS,a}
+
+# The rootfs volumes, one per A/B slot, named per slot like the boot partitions
+# above. Nothing distinguishes them at run time: /etc/fstab names
+# /dev/mapper/rootfs, which is whichever slot the kernel mapped, so the same
+# payload serves both and neither slot is the "real" one.
+rootpart_a: /dev/${.vg}/rootfs.A
+rootpart_b: /dev/${.vg}/rootfs.B
+
+# Per-slot file system identity, stamped on each slot after the shared payload
+# is written to it. Fixed rather than generated: the build is reproducible
+# elsewhere -- cpio --reproducible, gzip -n -- and "tune2fs -U random" would
+# make two builds of the same tree differ. They only have to be distinct from
+# each other, since they identify a slot within one device.
+#
+# Generated once as UUID version 5, so they can be regenerated rather than
+# guessed:
+#   python3 -c "import uuid; ns = uuid.uuid5(uuid.NAMESPACE_DNS,
+#   'rootfs.sima.ai'); print(uuid.uuid5(ns, 'rootfs.A'))"
+rootuuid_a: 740d31f2-aa09-56e0-9c6e-ee357eb533d0
+rootuuid_b: 905013a4-b365-5e4a-8ded-0f223098085a
+
+# The same for the boot file systems, which also come from one shared
+# image. FAT has no ext4-style UUID: the identity is the 32-bit volume id
+# (blkid shows it as XXXX-XXXX) plus the label. These matter more than the
+# rootfs pair: both boot partitions are always visible, where the rootfs
+# slots are activation-skipped, so a shared id would leave blkid and lsblk
+# permanently ambiguous rather than only while both are active. The values
+# are the first eight hex digits of UUIDs generated once as version 5, so
+# they can be regenerated rather than guessed:
+#   python3 -c "import uuid; ns = uuid.uuid5(uuid.NAMESPACE_DNS,
+#   'boot.sima.ai'); print(uuid.uuid5(ns, 'boot.A'))"
+bootuuid_a: EAF6D693
+bootuuid_b: 0ACF4014
+
+# Per-slot rootfs volume size. Each slot keeps the capacity the single ROOT
+# partition had in the pre-A/B layout (image size minus the 512M boot
+# partition), so no flavour loses rootfs headroom by gaining a second slot.
+rootfs_minimal: 1536M
+rootfs_palette: 5632M
+rootfs_securepalette: 5632M
+
+# Image size = 512M boot + one rootfs slot per populated slot + the initial
+# data volume. The data volume takes whatever is left and is grown to fill the
+# eMMC on first boot by simaai-growlvm, so these only need to cover the
+# shipped artifact.
+#
+# Each pair has to stay in step with rootfs_<flavor> above: size_ab is size_a
+# plus exactly one more slot. Nothing derives one from the other -- the config
+# language has no arithmetic -- so a changed slot size means changing both.
+size_a_minimal: 2560M
+size_ab_minimal: 4G
+size_a_palette: 7680M
+size_ab_palette: 13G
+size_a_securepalette: 7680M
+size_ab_securepalette: 13G
+
+# The logical volumes to provision, in allocation order: 'data' takes
+# 100%FREE, so it stays last and the slots that precede it get their fixed
+# size first. data is formatted as it is created.
+#
+# The rootfs slots deliberately declare no fs and no label: their file system
+# arrives as a whole image written by a later stage, so a mkfs here would be
+# overwritten work -- and harmful work, because that write skips the payload's
+# holes to keep the image sparse and would leave this mkfs's metadata, stale
+# superblock backups included, sitting in the gaps.
+vol_a:
+- name: rootfs.A
+  size: ${oc.select:params.rootfs_${flavor}}
+vol_b:
+- name: rootfs.B
+  size: ${oc.select:params.rootfs_${flavor}}
+vol_data:
+- name: data
+  extents: 100%FREE
+  label: data
+  fs: ext4
+volumes_a: ${concat:${params.vol_a},${params.vol_data}}
+volumes_ab: ${concat:${params.vol_a},${concat:${params.vol_b},${params.vol_data}}}
+
+# Slot to volume mapping for the dm-init tables, and the volumes LVM must not
+# autoactivate. Both name only the slots that exist, so an A-only build asks
+# for neither a table nor a skip flag for slot B: its volume is created on the
+# board, at extents the build cannot know, and the update that populates it
+# writes the table from the volume's real geometry.
+dmslots_a:
+  A: rootfs.A
+dmslots_ab:
+  A: rootfs.A
+  B: rootfs.B
+skipact_a:
+- rootfs.A
+skipact_ab:
+- rootfs.A
+- rootfs.B
+
+# Writing the shared rootfs payload to one slot, grouped per slot so a build
+# composes whole slots. Every populated slot gets the same image, so the
+# flashed path and the update path install identical bytes.
+#
+# conv=sparse keeps the holes in the payload as holes in the image, which is
+# only safe because the volumes are left unformatted; there is nothing
+# underneath for a skipped block to expose.
+#
+# resize2fs then grows the copy out to the slot's volume, which the payload is
+# deliberately smaller than, so the board gets the whole slot.
+#
+# The payload carries one label and one UUID, so each slot is stamped with its
+# own afterwards. Nothing in the image depends on either -- / is mounted
+# through the dm-init mapping by device and fstab names /dev/mapper/rootfs --
+# but two volumes sharing a UUID make blkid and lsblk ambiguous the moment
+# both are activated, and the label is the only thing that says which slot a
+# running system came from without decoding the dm table. An update stamps the
+# slot it writes the same way.
+#
+# tune2fs handles metadata_csum here: the feature is enabled, so changing the
+# UUID rewrites every metadata checksum. That needs a clean file system, which
+# is what the mke2fs that built the payload produced, so no e2fsck first.
+wroot_a:
+- dd if=${params.ext4} of=${params.rootpart_a} bs=4M conv=sparse,fsync status=none
+- resize2fs ${params.rootpart_a}
+- tune2fs -L ROOT_A -U ${params.rootuuid_a} ${params.rootpart_a}
+wroot_b:
+- dd if=${params.ext4} of=${params.rootpart_b} bs=4M conv=sparse,fsync status=none
+- resize2fs ${params.rootpart_b}
+- tune2fs -L ROOT_B -U ${params.rootuuid_b} ${params.rootpart_b}
+write_a: ${params.wroot_a}
+write_ab: ${concat:${params.wroot_a},${params.wroot_b}}
+
+hbase:
+- PLATFORM=${platform} VERSION=${version} CODENAME=${codename} BUILD=${oc.env:BUILD, 0} BUILD_TYPE=${oc.env:BUILD_TYPE, custom} CIB_CREDENTIALS=${oc.env:CIB_CREDENTIALS,''} CURRENT_DIR=${oc.env:CURRENT_DIR} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/base.sh $1
+hminimal:
+- sh ${oc.env:CURRENT_DIR}/configs/images/hooks/minimal.sh $1
+hpalette:
+- CURRENT_DIR=${oc.env:CURRENT_DIR} OUTPUT_DIR=${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/palette.sh $1
+hsecurepalette:
+- CURRENT_DIR=${oc.env:CURRENT_DIR} OUTPUT_DIR=${oc.env:OUTPUT_DIR,${oc.env:CURRENT_DIR}} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/palette.sh $1
+hooks_minimal: ${concat:${params.hbase},${params.hminimal}}
+hooks_palette: ${concat:${params.hooks_minimal},${params.hpalette}}
+hooks_securepalette: ${concat:${params.hooks_minimal},${params.hsecurepalette}}
+
+pbase:
+- ${include:manifests/packages-base.yaml}
+# Boot firmware. Every flavor boots RoT -> BL1 -> BL2 -> BL31 -> [BL32] -> BL33
+# from the same kernel, the same TF-A and the same U-Boot; only the tRoot blob
+# differs. troot-${platform}-secure publishes secure-boot = 1 and injects the
+# ROTPK, so TF-A anchors the FIP to it and runs OP-TEE, and U-Boot enforces the
+# kernel-FIT signature; troot-${platform} publishes 0, so the same FIP is
+# checked unanchored, OP-TEE is skipped and U-Boot checks only FIT hashes.
+#
+# atf-${platform} ships the TBBR fip.bin (BL31 + BL32/OP-TEE + BL33/U-Boot and
+# the certificate chain) at /boot/fip.bin. The image bootloader stage copies it
+# into the shared boot file system image next to u-boot.bin and the fitImage,
+# so every A/B slot's vfat boot partition carries it at its root, where tRoot's
+# load_atf_fip() reads FIP.BIN (active slot first, sibling second, SPI-NOR
+# last). The bootloader stage fails the build if it is missing.
+pboot_common:
+- linux-image-6.18.3-${platform}* u-boot-${platform} atf-${platform}
+pnormalboot: ${concat:${params.pboot_common},[troot-${platform}]}
+psecureboot: ${concat:${params.pboot_common},[troot-${platform}-secure]}
+pminimal:
+- simaai-memory-lib simaai-base-files-${platform} simaai-hpi-${platform} simaai-discovery
+- nfs-common parted lvm2 dosfstools rsyslog man-db chrony device-tree-compiler gpg iperf3 stress-ng libubootenv-tool iptables kea network-manager swupdate
+ppalette:
+- simaai-palette-${platform} ${include:manifests/packages-modalix.yaml} ${include:manifests/elxr-manifests/packages-xfce4.yaml}
+- python3-pip xdg-utils chromium chromium-sandbox pulseaudio wpasupplicant audacity v4l-utils i2c-tools psmisc firmware-realtek
+packages_minimal: ${concat:${params.pbase},${concat:${params.pnormalboot},${params.pminimal}}}
+packages_palette: ${concat:${params.packages_minimal},${params.ppalette}}
+packages_securepalette: ${concat:${params.pbase},${concat:${params.psecureboot},${concat:${params.pminimal},${params.ppalette}}}}

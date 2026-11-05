@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate this board's SSH host keys
+# The image ships no host keys; sshd needs them, and ssh-keygen -A makes only the missing ones.
+Before=ssh.service
+ConditionPathIsReadWrite=/etc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=ssh.service

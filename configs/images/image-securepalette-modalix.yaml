@@ -1,0 +1,27 @@
+---
+platform: modalix
+flavor: securepalette
+name: elxr-${flavor}-${platform}
+description: "SiMa.ai eLxr ${flavor} image for ${platform}."
+version: 3.0.0
+codename: agate
+architecture: arm64
+schemaVersion: 1
+params: "${package:image-params.yaml,
+{
+  name:${name},
+  architecture:${architecture},
+  version:${version},
+  codename:${codename},
+  flavor:${flavor}
+}}"
+stages: "${package:image-stages.yaml,
+{
+  params:${params},
+  name:${name},
+  architecture:${architecture},
+  version:${version},
+  codename:${codename},
+  platform:${platform},
+  flavor:${flavor}
+}}"
