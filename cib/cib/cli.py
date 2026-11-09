@@ -7,7 +7,9 @@ import json
 import lzma
 import os
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,7 +29,10 @@ VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)")  # use fullma
 FIELDS = {"base": str, "target": str, "release": (str, int, float), "version": (str, int, float),
           "slots": (str, int, float), "packages": dict, "overlay": str, "hooks": list,
           "signing": dict, "debs": dict, "vendor": (str, int, float), "swu": dict,
-          "sources": list, "sima_source": str}
+          "sources": list, "sima_source": str,
+          "encryption": dict}
+AES_KEY_RE = re.compile(r"[0-9a-f]{64} [0-9a-f]{32}")  # swupdate -K file: <key> <ivt>
+ENCRYPTED = ("rootfs.ext4.gz", "boot.vfat.gz")  # the payloads cib sign --encrypt covers
 SAFE_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")
 # Repo-root items the image hooks reach through CURRENT_DIR or symlinks.
 REPO_ITEMS = ("elxr-config", "scripts/build_scripts/prepare_buildinfo.sh",
@@ -49,6 +54,7 @@ signing:
   ca: keys/ca.crt             # boards trust it: /etc/swupdate/swupdate.crt
 debs:
   key: keys/debs-signing.asc  # custom-debs/*.deb need a <name>.deb.sig by this key
+# encryption: {{key: keys/payload.key}}   # cib keys payload; for cib sign --encrypt
 # vendor: Acme              # written to /etc/buildinfo
 # swu: {{description: swu/sw-description, script: swu/update.sh}}
 # sources: ["deb http://mirror.corp/debian trixie main"]   # replaces the Debian/eLxr lines
@@ -110,10 +116,64 @@ def sha256(path):
 
 # ---- keys -------------------------------------------------------------------
 
+def newkey(algo):
+    return ["rsa:4096"] if algo == "rsa4096" else \
+        ["ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]
+
+
 def subj(cn, role):
     if any(ch in cn for ch in "/\\+"):  # RDN separators in openssl -subj
         die("--cn must not contain /, \\ or +")
     return f"/CN={cn} {role}"
+
+
+RENEW_TMP = ".cib-renew-"  # work dir in keys/; holds a key copy while the pair is swapped
+
+
+@contextlib.contextmanager
+def clean_on_signal():
+    """Turn SIGTERM and SIGHUP into an exit, so the with-blocks below delete their key copies."""
+    def stop(sig, frame):
+        sys.exit(128 + sig)
+    old = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
+def gen_leaf(out, algo, cn):
+    """Write swu-signing.{key,crt}, issued by ca.{key,crt} in out, over any old pair."""
+    for stale in out.glob(RENEW_TMP + "*"):  # left by a run that was killed (SIGKILL)
+        shutil.rmtree(stale, ignore_errors=True)
+    with clean_on_signal(), tempfile.TemporaryDirectory(prefix=RENEW_TMP, dir=out) as d:
+        d = Path(d)
+        run(["openssl", "req", "-newkey", *newkey(algo), "-nodes",
+             "-keyout", d / "swu-signing.key", "-out", d / "leaf.csr",
+             "-subj", subj(cn, "SWU signing")])
+        (d / "leaf.ext").write_text(
+            "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=codeSigning,emailProtection\n")
+        run(["openssl", "x509", "-req", "-in", d / "leaf.csr",
+             "-CA", out / "ca.crt", "-CAkey", out / "ca.key",
+             "-CAserial", d / "ca.srl", "-CAcreateserial",
+             "-out", d / "swu-signing.crt", "-days", "825",
+             "-extfile", d / "leaf.ext"])
+        (d / "swu-signing.key").chmod(0o600)
+        # An expired or non-CA ca.crt signs without error; stop before the old pair goes.
+        check_issued(d / "swu-signing.crt", out / "ca.crt")
+        # If the certificate swap fails, the old key goes back so the pair still matches.
+        old = out / "swu-signing.key"
+        if old.exists():
+            shutil.copy2(old, d / "old.key")
+        os.replace(d / "swu-signing.key", old)
+        try:
+            os.replace(d / "swu-signing.crt", out / "swu-signing.crt")
+        except BaseException:
+            if (d / "old.key").exists() and (d / "swu-signing.crt").exists():
+                os.replace(d / "old.key", old)
+            raise
 
 
 def gen_keys(out, algo="rsa4096", cn="Customer"):
@@ -122,27 +182,13 @@ def gen_keys(out, algo="rsa4096", cn="Customer"):
     out.mkdir(parents=True, exist_ok=True)
     if (out / "ca.key").exists():
         die(f"{out}/ca.key exists; refusing to overwrite keys")
-    newkey = ["rsa:4096"] if algo == "rsa4096" else \
-        ["ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]
-    run(["openssl", "req", "-x509", "-newkey", *newkey, "-nodes",
+    run(["openssl", "req", "-x509", "-newkey", *newkey(algo), "-nodes",
          "-keyout", out / "ca.key", "-out", out / "ca.crt",
          "-subj", ca_subj, "-days", "3650",
          "-addext", "basicConstraints=critical,CA:TRUE",
          "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
-    run(["openssl", "req", "-newkey", *newkey, "-nodes",
-         "-keyout", out / "swu-signing.key", "-out", out / "leaf.csr",
-         "-subj", subj(cn, "SWU signing")])
-    (out / "leaf.ext").write_text(
-        "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n"
-        "extendedKeyUsage=codeSigning,emailProtection\n")
-    run(["openssl", "x509", "-req", "-in", out / "leaf.csr",
-         "-CA", out / "ca.crt", "-CAkey", out / "ca.key", "-CAcreateserial",
-         "-out", out / "swu-signing.crt", "-days", "825",
-         "-extfile", out / "leaf.ext"])
-    for tmp in ("leaf.csr", "leaf.ext", "ca.srl"):
-        (out / tmp).unlink(missing_ok=True)
-    for key in ("ca.key", "swu-signing.key"):
-        (out / key).chmod(0o600)
+    (out / "ca.key").chmod(0o600)
+    gen_leaf(out, algo, cn)
 
 
 def gpg(home, *args, **kw):
@@ -197,6 +243,48 @@ def cmd_keys_init(a):
     gen_deb_key(a.out, a.cn)
     chown(a.out)
     print(f"cib: keys written to {a.out}; keep ca.key offline")
+
+
+def gen_payload_key(out):
+    """Write payload.key: '<AES-256 key> <ivt>' in hex, the file swupdate -K reads."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    f = out / "payload.key"
+    if f.exists():
+        die(f"{f} exists; refusing to overwrite the payload key")
+    with os.fdopen(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as h:
+        h.write(f"{secrets.token_hex(32)} {secrets.token_hex(16)}\n")
+
+
+def cmd_keys_payload(a):
+    gen_payload_key(a.out)
+    chown(a.out)
+    print(f"cib: payload key written to {a.out}/payload.key; set encryption.key in "
+          "image.yaml so the image holds it, and keep it secret")
+
+
+def read_aes_key(path):
+    """The hex AES key of a payload key file."""
+    f = Path(path)
+    if not f.is_file():
+        die(f"{f} not found (cib keys payload creates it)")
+    text = f.read_text().strip()
+    if not AES_KEY_RE.fullmatch(text):
+        die(f"{f} must hold '<64 hex key> <32 hex ivt>' on one line")
+    return text.split()[0]
+
+
+def cmd_keys_renew(a):
+    out = Path(a.out)
+    for name in ("ca.key", "ca.crt"):
+        if not (out / name).is_file():
+            die(f"{out}/{name} not found; a new signing leaf needs the CA")
+    try:
+        gen_leaf(out, a.algo, a.cn)
+    except OSError as e:
+        die(f"cannot write the new signing leaf: {e}")
+    chown(out / "swu-signing.key", out / "swu-signing.crt")
+    print(f"cib: new signing leaf written to {out}; keep ca.key offline")
 
 
 # ---- workspace --------------------------------------------------------------
@@ -376,12 +464,13 @@ def check_description(text, members):
         die("swu.description must install boot0.be")
 
 
-def write_effective(ws, cfg, version, trust=None, debs=()):
+def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
     """Write cib-* copies of the reference flavor, params and stages.
 
     trust, if given, is installed in the rootfs as /etc/swupdate/swupdate.crt
     with an /etc/swupdate.cfg that uses it and refuses older versions; debs
-    (package, version) are pinned so apt leaves them in place.
+    (package, version) are pinned so apt leaves them in place; aes_key (a key
+    file) is installed for swupdate to decrypt encrypted bundles.
     """
     img = ws / IMAGES
     base = cfg["base"]
@@ -420,7 +509,7 @@ def write_effective(ws, cfg, version, trust=None, debs=()):
     syncs = [img / "overlay/elxr", img / "overlay/simaai"]
     if overlay.is_dir() and any(overlay.iterdir()):
         syncs.append(overlay.resolve())
-    if trust or debs:
+    if trust or debs or aes_key:
         tdir = ws / "build/trust"
         shutil.rmtree(tdir, ignore_errors=True)
         tdir.mkdir(parents=True)
@@ -430,10 +519,14 @@ def write_effective(ws, cfg, version, trust=None, debs=()):
         shutil.copy(trust, tdir / "etc/swupdate/swupdate.crt")
         (tdir / "etc/swupdate.cfg").write_text(
             'globals :\n{\n\tpublic-key-file = "/etc/swupdate/swupdate.crt";\n'
-            f'\tno-downgrading = "{version}";\n}};\n')
+            + ('\taes-key-file = "/etc/swupdate/aes.key";\n' if aes_key else "")
+            + f'\tno-downgrading = "{version}";\n}};\n')
         (tdir / "usr/bin").mkdir(parents=True)
         (tdir / "usr/bin/simaai-update").write_text(UPDATE_WRAPPER)
         (tdir / "usr/bin/simaai-update").chmod(0o755)
+    if aes_key:
+        (tdir / "etc/swupdate/aes.key").touch(mode=0o600)
+        (tdir / "etc/swupdate/aes.key").write_text(Path(aes_key).read_text())
     if debs:
         (tdir / "etc/apt/preferences.d").mkdir(parents=True)
         (tdir / "etc/apt/preferences.d/99cib-custom").write_text("".join(
@@ -581,10 +674,13 @@ def cmd_build(a):
     slots = str(cfg.get("slots", "ab"))
     if slots not in ("a", "ab"):
         die(f"slots must be 'a' or 'ab', not {slots!r}")
+    aes = (cfg.get("encryption") or {}).get("key")
+    if aes:
+        read_aes_key(ws / aes)
     out = ws / "out"
     try:  # from here on the throwaway CA key and root-owned files are cleaned up
         key, cert, ca = build_signing(ws, cfg, a.dev)
-        config = write_effective(ws, cfg, version, ca, debs)
+        config = write_effective(ws, cfg, version, ca, debs, aes and ws / aes)
         out.mkdir(exist_ok=True)
         env = dict(os.environ, CURRENT_DIR=str(ws), OUTPUT_DIR=str(out),
                    ROOTFS_SLOTS=slots, SWU_SIGNING_KEY=str(key), SWU_SIGNING_CERT=str(cert))
@@ -799,9 +895,16 @@ def cmd_sign(a):
             die(f"{swu} was built with --dev: its image trusts a throwaway CA; "
                 "rebuild without --dev")
         if a.dev:
-            (d / "sw-description").write_text(re.sub(
-                r'(version\s*=\s*")([^"]*)(")',
-                lambda m: m[1] + m[2].removesuffix("-dev") + "-dev" + m[3], desc, count=1))
+            desc = re.sub(r'(version\s*=\s*")([^"]*)(")',
+                          lambda m: m[1] + m[2].removesuffix("-dev") + "-dev" + m[3], desc, count=1)
+        if a.encrypt:
+            aes = a.aes_key
+            if not aes and Path("image.yaml").is_file():
+                aes = (read_yaml(Path("image.yaml")).get("encryption") or {}).get("key")
+            if not aes:
+                die("--encrypt needs --aes-key or encryption.key in image.yaml")
+            desc = encrypt_payloads(d, names, desc, read_aes_key(aes))
+        (d / "sw-description").write_text(desc)
         cmd = ["openssl", "cms", "-sign", "-binary", "-noattr",
                "-in", d / "sw-description", "-out", d / "sw-description.sig",
                "-signer", cert, "-outform", "DER", "-nosmimecap"]
@@ -824,6 +927,36 @@ def strip_comments(text):
     """Drop /* */, // and # comments; quoted strings are kept as they are."""
     return re.sub(r'("(?:[^"\\]|\\.)*")|/\*.*?\*/|(?://|#)[^\n]*',
                   lambda m: m[1] or "", text, flags=re.S)
+
+
+def encrypt_payloads(d, names, desc, key):
+    """Encrypt the payload members in d (AES-256-CBC, a fresh ivt each) and mark them in
+    the description with their new sha256. Returns the new description."""
+    if re.search(r"\bencrypted\s*=\s*true", strip_comments(desc)):
+        die("the bundle is already encrypted")
+    todo = [n for n in ENCRYPTED if n in names]
+    if not todo:
+        die(f"the bundle has none of {', '.join(ENCRYPTED)} to encrypt")
+    for n in todo:
+        ivt = secrets.token_hex(16)
+        # openssl takes the key only as an argument; this runs in the signing container
+        run(["openssl", "enc", "-aes-256-cbc", "-K", key, "-iv", ivt,
+             "-in", d / n, "-out", d / (n + ".enc")])
+        os.replace(d / (n + ".enc"), d / n)
+        digest = sha256(d / n)
+
+        def block(m):
+            if not re.search(rf'filename\s*=\s*"{re.escape(n)}"', m[0]):
+                return m[0]
+            b = re.sub(r'(sha256\s*=\s*")[^"]*(")', lambda x: x[1] + digest + x[2], m[0])
+            return re.sub(r'([ \t]*)(filename\s*=\s*"[^"]*";)',
+                          lambda x: f'{x[1]}{x[2]}\n{x[1]}encrypted = true;\n{x[1]}ivt = "{ivt}";',
+                          b, count=1)
+        new = re.sub(r"\{[^{}]*\}", block, desc)
+        if new == desc:
+            die(f"cannot find the sw-description entry of {n} to mark it encrypted")
+        desc = new
+    return desc
 
 
 def artifacts(text):
@@ -1057,11 +1190,17 @@ def parser():
 
     keys = sub.add_parser("keys", help="signing keys").add_subparsers(
         dest="sub", required=True)
-    s = keys.add_parser("init", help="create the customer CA and SWU leaf")
-    s.add_argument("--algo", default="rsa4096", choices=["rsa4096", "ecdsa-p384"])
+    s = keys.add_parser("payload", help="create the AES key for cib sign --encrypt")
     s.add_argument("--out", default="keys")
-    s.add_argument("--cn", default="Customer")
-    s.set_defaults(fn=cmd_keys_init)
+    s.set_defaults(fn=cmd_keys_payload)
+    for name, fn, text in (
+            ("init", cmd_keys_init, "create the customer CA and SWU leaf"),
+            ("renew", cmd_keys_renew, "replace the SWU leaf with a new one from the same CA")):
+        s = keys.add_parser(name, help=text)
+        s.add_argument("--algo", default="rsa4096", choices=["rsa4096", "ecdsa-p384"])
+        s.add_argument("--out", default="keys")
+        s.add_argument("--cn", default="Customer")
+        s.set_defaults(fn=fn)
 
     s = sub.add_parser("verify-debs", help="check custom-debs/ signatures")
     s.set_defaults(fn=cmd_verify_debs)
@@ -1082,6 +1221,10 @@ def parser():
     s.add_argument("--pkcs11", metavar="URI")
     s.add_argument("--cert")
     s.add_argument("--dev", action="store_true")
+    s.add_argument("--encrypt", action="store_true",
+                   help="AES-256-CBC encrypt the rootfs and boot payloads")
+    s.add_argument("--aes-key", metavar="FILE",
+                   help="payload key (default: encryption.key in image.yaml)")
     s.add_argument("-o", "--out")
     s.set_defaults(fn=cmd_sign)
 

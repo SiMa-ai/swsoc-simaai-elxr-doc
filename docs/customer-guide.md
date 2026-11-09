@@ -45,12 +45,35 @@ permissions and where you keep them protect them. Keep the signing key in an HSM
 signing leaf for 825 days; renew the leaf (below) before it expires.
 
 A board trusts what is in `/etc/swupdate/swupdate.crt`. You can rotate the signing leaf
-without touching boards, as long as the new leaf is issued by the same CA. Changing the
+without touching boards, as long as the new leaf is issued by the same CA: put `ca.key`
+back in `keys/`, run `cib keys renew`, and move `ca.key` offline again. Changing the
 CA means shipping a bundle signed under the old CA whose image carries the new
 `ca.crt`: build with `signing.ca` pointing at the new CA, then set `signing.ca` back
 to the old CA before `cib sign`, which checks the leaf against it (or name the
 bundle and sign with `--key`/`--cert` from a directory holding neither `image.yaml`
 nor `keys/ca.crt`).
+
+## Encrypted bundles
+
+`cib sign --encrypt` encrypts the rootfs and boot payloads of a bundle with AES-256-CBC,
+each with its own IV recorded in the signed `sw-description`. `boot0.be` and the update
+script stay in the clear. To use it:
+
+1. `cib keys payload` writes `keys/payload.key` (the key and a default IV, in the
+   format `swupdate -K` reads).
+2. Set `encryption: {key: keys/payload.key}` in `image.yaml` and build. The image then
+   holds the key as `/etc/swupdate/aes.key`, readable by root only, and
+   `/etc/swupdate.cfg` names it.
+3. `cib sign --encrypt` (or `--aes-key <file>` on a signing host without `image.yaml`).
+
+A board installs an encrypted bundle only if its running image already holds the key.
+For the first one, install an unencrypted bundle of an image built with
+`encryption.key`, or pass the key by hand: `swupdate -i <bundle> -K payload.key ...`.
+
+This keeps the image contents confidential in transit and on update servers. It does
+not protect against anyone who can read a board's root filesystem, because the key is
+stored there. The `.img` and `.img.gz` files in `out/` are never encrypted and contain
+the key.
 
 ## Moving a board to your keys
 

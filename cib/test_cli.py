@@ -1,5 +1,5 @@
 """assert checks for cib.cli; run: python3 cib/test_cli.py (host, no container)."""
-import os, sys, tempfile, json
+import os, re, subprocess, sys, tempfile, json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cib.cli as c
@@ -159,9 +159,10 @@ with tempfile.TemporaryDirectory() as d:
             'software = { version = "3.0.0.1"; hardware-compatibility = ["1"];\n'
             f' images = ( {{ filename = "boot0.be"; sha256 = "{c.sha256(src / "boot0.be")}"; }} ); }}')
         c.write_swu(["sw-description", "boot0.be"], src, t / "u.swu")
-        def sign(swu, out, dev=False):
+        def sign(swu, out, dev=False, encrypt=False, aes=None):
             c.cmd_sign(argparse.Namespace(swu=str(swu), out=str(out), dev=dev, key=str(t / "keys/swu-signing.key"),
-                                          cert=str(t / "keys/swu-signing.crt"), pkcs11=None))
+                                          cert=str(t / "keys/swu-signing.crt"), pkcs11=None,
+                                          encrypt=encrypt, aes_key=aes))
         def version(swu):
             with tempfile.TemporaryDirectory() as x:
                 c.read_swu(swu, x)
@@ -173,6 +174,37 @@ with tempfile.TemporaryDirectory() as d:
         sign(t / "u.swu", t / "d1.swu", dev=True); sign(t / "d1.swu", t / "d2.swu", dev=True)
         assert version(t / "d1.swu") == version(t / "d2.swu") == "3.0.0.1-dev", version(t / "d2.swu")
         assert "not found" in dies(sign, t / "missing.swu", t / "x.swu")
+        # payload encryption: key file checks, round trip, sha256 over the ciphertext, no double encryption
+        c.gen_payload_key(t / "keys")
+        assert (t / "keys/payload.key").stat().st_mode & 0o777 == 0o600
+        assert "exists" in dies(c.gen_payload_key, t / "keys")
+        (t / "bad.key").write_text("nothex\n")
+        assert "must hold" in dies(c.read_aes_key, t / "bad.key")
+        assert "not found" in dies(c.read_aes_key, t / "none.key")
+        assert "has none of" in dies(sign, t / "u.swu", t / "e0.swu", encrypt=True, aes=str(t / "keys/payload.key"))
+        (src / "rootfs.ext4.gz").write_bytes(os.urandom(1000))
+        (src / "boot.vfat.gz").write_bytes(os.urandom(37))
+        (src / "sw-description").write_text(
+            'software = { version = "3.0.0.1"; hardware-compatibility = ["1"]; update = { full = { images = (\n'
+            + "".join(f' {{\n\t\tfilename = "{n}";\n\t\tsha256 = "{c.sha256(src / n)}";\n }},\n'
+                      for n in ("rootfs.ext4.gz", "boot.vfat.gz"))
+            + f' {{ filename = "boot0.be"; sha256 = "{c.sha256(src / "boot0.be")}"; }} ); }}; }}; }}')
+        plain_rootfs = (src / "rootfs.ext4.gz").read_bytes()
+        c.write_swu(["sw-description", "boot0.be", "rootfs.ext4.gz", "boot.vfat.gz"], src, t / "p.swu")
+        sign(t / "p.swu", t / "e.swu", encrypt=True, aes=str(t / "keys/payload.key"))
+        verify(t / "e.swu")
+        with tempfile.TemporaryDirectory() as x:
+            c.read_swu(t / "e.swu", x)
+            desc = (Path(x) / "sw-description").read_text()
+            assert desc.count("encrypted = true;") == 2 and desc.count("ivt = ") == 2, desc
+            ivt = re.search(r'filename = "rootfs.ext4.gz";\s*encrypted = true;\s*ivt = "([0-9a-f]{32})"', desc)[1]
+            assert (Path(x) / "boot0.be").read_text() == "b", "boot0.be must stay plain"
+            enc = Path(x) / "rootfs.ext4.gz"
+            assert enc.read_bytes() != plain_rootfs
+            dec = subprocess.run(["openssl", "enc", "-d", "-aes-256-cbc", "-K", c.read_aes_key(t / "keys/payload.key"),
+                                  "-iv", ivt, "-in", enc], capture_output=True, check=True).stdout
+            assert dec == plain_rootfs, "round trip"
+        assert "already encrypted" in dies(sign, t / "e.swu", t / "e2.swu", encrypt=True, aes=str(t / "keys/payload.key"))
         with tempfile.TemporaryDirectory() as x:   # a changed member no longer matches the signed sha256
             c.read_swu(t / "s.swu", x); (Path(x) / "boot0.be").write_text("evil")
             c.write_swu(["sw-description", "sw-description.sig", "boot0.be"], x, t / "bad.swu")

@@ -20,7 +20,7 @@ SiMa.ai SDK manual:
 | `UPSTREAM` | What the configs were taken from (the SiMa.ai 3.0.0 image configs, the eLxr config tool commit) and how they differ |
 
 Only the `minimal` flavor has been built end to end. Not implemented:
-payload encryption, `cib mirror`, `--offline`, `--from` (an offline build will need another
+`cib mirror`, `--offline`, `--from` (an offline build will need another
 way to check the `boot0.be` md5). Secure-boot flavors and
 fused boards have not been tested; for `securepalette` the kernel FIT signature is
 not checked against the key in the image's U-Boot.
@@ -79,8 +79,14 @@ mounted alone, read-only.
    gpg key for custom debs. Keep `ca.key` offline.
 
    ```bash
-   cib keys init
+   cib keys init --cn 'Your Company'
    ```
+
+   `--cn` names the CA (`CN=<cn> SWU CA`), which boards and support see; it defaults
+   to `Customer`.
+
+   `cib keys renew` replaces the signing leaf with a new one from the same CA.
+   It needs `ca.key` back in `keys/`; pass the same `--algo` and `--cn` as for `cib keys init`.
 
 3. **Add custom packages** to `custom-debs/` and sign each one. `cib build` accepts
    only debs signed by the key in `debs.key`:
@@ -127,6 +133,11 @@ mounted alone, read-only.
    `PKCS11_MODULE_PATH` if the engine does not find the module. Signing can run
    on any host that only has the bundle.
 
+   `cib sign --encrypt` also encrypts `rootfs.ext4.gz` and `boot.vfat.gz` with
+   AES-256-CBC. Create the key once with `cib keys payload` and set `encryption.key`
+   before `cib build`, so the image holds the key and decrypts later bundles by itself.
+   See the customer guide for what this does and does not protect.
+
 6. **Other commands**: `cib diff --against <sbom-or-manifest>` lists package
    differences; `cib clean [--yes]` lists (or with `--yes` detaches) loop devices
    and volume groups left by an interrupted build. It matches every `elxr-*-<target>-*.img`
@@ -146,6 +157,7 @@ mounted alone, read-only.
 | `hooks` | A list of script files in the workspace, run in order after SiMa.ai's customize hooks (paths: letters, digits and `_ . / + -` only). |
 | `signing.cert`, `signing.key`, `signing.ca` | Bundle signing leaf and key; `ca` is installed in the image as `/etc/swupdate/swupdate.crt`. |
 | `debs.key` | Public key that `custom-debs/*.deb` signatures must come from. |
+| `encryption.key` | Payload key file from `cib keys payload`. The build installs it as `/etc/swupdate/aes.key` (mode 600); `cib sign --encrypt` encrypts with it. |
 | `vendor` | One line written to `/etc/buildinfo` as `VENDOR = ...`. |
 | `swu.description`, `swu.script` | Your own `sw-description` and update script. The description must contain `@@VERSION@@`, `@@HW_COMPAT@@`, `@@<member>@@` for every hash, and install `boot0.be`. |
 | `sources` | List of apt lines replacing the Debian and eLxr ones (for a mirror). |
