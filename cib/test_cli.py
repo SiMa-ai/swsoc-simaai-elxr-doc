@@ -227,6 +227,298 @@ with tempfile.TemporaryDirectory() as d:
         assert c.check_debs(ws, cfg) == [("u-boot-modalix", "9")]
     finally:
         c.check_deb_signature, c.run = real
+# kernel FIT signature: a FIT made and signed by mkimage, checked against the key mkimage wrote
+import shutil
+if all(shutil.which(x) for x in ("mkimage", "dtc", "openssl")):
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d); (t / "keys").mkdir(); (t / "k.bin").write_bytes(os.urandom(5000))
+        def sh(*cmd):
+            subprocess.run(cmd, cwd=t, check=True, capture_output=True)
+        def make(hint, *opts):
+            if not (t / f"keys/{hint}.key").exists():
+                sh("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"keys/{hint}.key",
+                   "-out", f"keys/{hint}.crt", "-subj", "/CN=t", "-days", "1")
+            (t / "t.its").write_text('/dts-v1/; / { description = "t"; #address-cells = <1>;\n'
+                ' images { kernel { description = "k"; data = /incbin/("k.bin"); type = "kernel"; arch = "arm64";\n'
+                '  os = "linux"; compression = "none"; load = <0x80000>; entry = <0x80000>; hash-1 { algo = "sha256"; }; }; };\n'
+                ' configurations { default = "conf"; conf { description = "c"; kernel = "kernel";\n'
+                '  signature-1 { algo = "sha256,rsa2048"; key-name-hint = "%s"; sign-images = "kernel"; }; }; }; };\n' % hint)
+            (t / "e.dts").write_text("/dts-v1/; / { };\n")
+            sh("dtc", "-O", "dtb", "-o", f"{hint}.dtb", "e.dts")
+            sh("mkimage", *opts, "-f", "t.its", "-k", "keys", "-K", f"{hint}.dtb", "-r", f"{hint}.itb")
+            return (t / f"{hint}.itb").read_bytes(), c.required_keys(b"junk" + (t / f"{hint}.dtb").read_bytes())
+        fit, keys = make("prod")
+        assert [h for h, _ in keys.values()] == ["prod"], keys
+        c.fit_check(fit, keys)                                   # inline data
+        ext, _ = make("prod", "-E")
+        c.fit_check(ext, keys)                                   # external data (data-offset)
+        bad = bytearray(fit); bad[fit.find(b"c\0", fit.find(b"conf"))] ^= 1
+        assert "not signed by" in dies(c.fit_check, bytes(bad), keys), "changed configuration"
+        j = fit.find((t / "k.bin").read_bytes()[:64]); bad = bytearray(fit); bad[j + 9] ^= 1
+        assert "does not match its sha256 hash" in dies(c.fit_check, bytes(bad), keys), "changed kernel"
+        _, other = make("other")
+        assert "not signed by U-Boot's required key 'other'" in dies(c.fit_check, fit, other)
+        # a signature over the kernel only: the configuration's fdt image could be swapped
+        (t / "cov.its").write_text('/dts-v1/; / { description = "t"; #address-cells = <1>;\n images {\n'
+            ' kernel { data = /incbin/("k.bin"); type = "kernel"; arch = "arm64"; os = "linux"; compression = "none";\n'
+            '  load = <0x80000>; entry = <0x80000>; hash-1 { algo = "sha256"; }; };\n'
+            ' fdt-1 { data = /incbin/("e.dts"); type = "flat_dt"; arch = "arm64"; compression = "none"; hash-1 { algo = "sha256"; }; }; };\n'
+            ' configurations { default = "conf"; conf { kernel = "kernel"; fdt = "fdt-1";\n'
+            '  signature-1 { algo = "sha256,rsa2048"; key-name-hint = "prod"; sign-images = "kernel"; }; }; }; };\n')
+        sh("dtc", "-O", "dtb", "-o", "cov.dtb", "e.dts")
+        sh("mkimage", "-f", "cov.its", "-k", "keys", "-K", "cov.dtb", "-r", "cov.itb")
+        assert dies(c.fit_check, (t / "cov.itb").read_bytes(), c.required_keys((t / "cov.dtb").read_bytes())) == \
+            "cib: the kernel FIT signature does not cover /images/fdt-1, /images/fdt-1/hash-1"
+        assert "not a FIT" in dies(c.fit_check, b"junk" * 20, keys)
+        def fdt(conf, hashes):   # unsigned: no keys, so only the configuration and image hashes are checked
+            (t / "x.dts").write_text('/dts-v1/; / { images { kernel { data = [00]; %s }; };\n'
+                                     ' configurations { default = "conf"; conf { %s }; }; };\n' % (hashes, conf))
+            sh("dtc", "-O", "dtb", "-o", "x.dtb", "x.dts"); return (t / "x.dtb").read_bytes()
+        H0 = 'hash-1 { algo = "sha256"; value = [%s]; };' % c.hashlib.sha256(b"\0").hexdigest()
+        c.fit_check(fdt('kernel = "kernel";', H0), {})
+        assert "has no kernel" in dies(c.fit_check, fdt('fdt = "kernel";', H0), {})
+        assert "has no kernel" in dies(c.fit_check, fdt('kernel = "gone";', H0), {})
+        for bad in ("", 'hash-1 { algo = "crc32"; value = <0>; };', 'hash-1 { algo = "sha256"; };'):
+            assert "has no hash that can be checked" in dies(c.fit_check, fdt('kernel = "kernel";', bad), {}), bad
+        c.fit_check(fdt('kernel = "kernel";', 'hash-1 { algo = "crc32"; value = <0>; };' + H0.replace("hash-1", "hash-2")), {})
+        assert "does not match its sha256 hash" in dies(c.fit_check, fdt('kernel = "kernel";', H0.replace("[6e", "[6f")), {})
+        assert c.required_keys(b"no trees here") == {}
+        # check_secure_boot: no key, the development key without --dev, and with it
+        devfit, _ = make("dev")
+        boot = t / "root/boot"; boot.mkdir(parents=True)
+        (boot / "fitImage").write_bytes(devfit); (boot / "fip.bin").write_bytes(b"x")
+        (boot / "u-boot.bin").write_bytes(b"x")
+        assert "no required FIT key" in dies(c.check_secure_boot, t / "root", False)
+        (boot / "u-boot.bin").write_bytes(b"pad" + (t / "dev.dtb").read_bytes())
+        assert "need --dev" in dies(c.check_secure_boot, t / "root", False)
+        c.check_secure_boot(t / "root", True)
+        (boot / "fitImage").write_bytes(fit)                    # signed by prod, U-Boot wants dev
+        assert "not signed by" in dies(c.check_secure_boot, t / "root", True)
+else:
+    FIT_SKIPPED = True
+# fip_bl33 / check_fip_uboot: the U-Boot inside fip.bin must be /boot/u-boot.bin
+import struct
+def fip(*entries, magic=0xAA640001, end=True):
+    toc = [(u, d) for u, d in entries] + ([(bytes(16), b"")] if end else [])
+    pos, head, body = 16 + 40 * len(toc), struct.pack("<IIQ", magic, 0, 0), b""
+    for u, d in toc:
+        head += struct.pack("<16sQQQ", u, pos + len(body) if d else 0, len(d), 0); body += d
+    return head + body
+OTHER, UB = bytes(range(1, 17)), b"u-boot" * 100
+assert c.fip_bl33(fip((OTHER, b"bl31"), (c.BL33_UUID, UB), (OTHER, b"cert"))) == UB, "middle entry"
+assert c.fip_bl33(fip((c.BL33_UUID, UB))) == UB, "only entry"
+assert c.fip_bl33(fip((c.BL33_UUID, b""))) == b"", "empty U-Boot entry"
+assert c.fip_bl33(fip((OTHER, b"bl31"))) is None, "no U-Boot entry"
+assert c.fip_bl33(fip((OTHER, b"x"), (c.BL33_UUID, UB), end=False)) == UB, "no end marker"
+assert c.fip_bl33(fip((OTHER, b"x"), end=False)) is None, "no end marker, no U-Boot"
+assert c.fip_bl33(fip((c.BL33_UUID, UB), magic=0xAA640002)) is None, "wrong magic"
+assert c.fip_bl33(fip() + struct.pack("<16sQQQ", c.BL33_UUID, 0, 4, 0)) is None, "entry after the end"
+assert all(c.fip_bl33(b) is None for b in (b"", b"x", fip((c.BL33_UUID, UB))[:55])), "too short"
+assert c.fip_bl33(fip((c.BL33_UUID, UB))[:-1]) is None, "cut payload"
+assert c.fip_bl33(fip((c.BL33_UUID, b""), end=False)) == b"", "table ends at end of file"
+assert c.fip_bl33(fip((c.BL33_UUID, b"first"), (c.BL33_UUID, b"second"))) == b"first", "first entry wins"
+assert c.BL33_UUID == bytes.fromhex("d6d0eea7fcead54b97829934f234b6e4"), "TF-A's BL33 UUID"
+with tempfile.TemporaryDirectory() as t:
+    boot = Path(t) / "boot"; boot.mkdir()
+    (boot / "fip.bin").write_bytes(fip((OTHER, b"bl31"), (c.BL33_UUID, UB)))
+    (boot / "u-boot.bin").write_bytes(UB)
+    c.check_fip_uboot(t)
+    for other in (UB[:-1], UB + b"x", UB.replace(b"u", b"v", 1), b""):
+        (boot / "u-boot.bin").write_bytes(other)
+        assert "not the U-Boot inside /boot/fip.bin" in dies(c.check_fip_uboot, t), other[:8]
+    (boot / "u-boot.bin").write_bytes(UB)
+    for bad in (b"junk" * 20, fip((OTHER, UB)), fip((c.BL33_UUID, UB))[:-1]):
+        (boot / "fip.bin").write_bytes(bad)
+        assert "not the U-Boot inside /boot/fip.bin" in dies(c.check_fip_uboot, t)
+    (boot / "fip.bin").write_bytes(fip((c.BL33_UUID, UB))[:-1]); (boot / "u-boot.bin").write_bytes(UB[:-1])
+    assert "not the U-Boot inside /boot/fip.bin" in dies(c.check_fip_uboot, t), "both cut alike"
+    # the check runs in cmd_finish, after the boot files are known to exist
+    (boot / "fip.bin").write_bytes(fip((c.BL33_UUID, UB))); (boot / "fitImage").write_bytes(b"f")
+    (Path(t) / "lib/linux-image-6-m").mkdir(parents=True)
+    (Path(t) / "var/lib/dpkg").mkdir(parents=True); (Path(t) / "var/lib/apt/lists").mkdir(parents=True)
+    (Path(t) / "var/lib/dpkg/status").write_text("".join(
+        f"Package: {p}\nStatus: install ok installed\nVersion: 1\n\n"
+        for p in ("linux-image-6-m", "u-boot-m", "atf-m")))
+    (Path(t) / "var/lib/apt/lists/repo.sima.ai_dists_x_Packages").write_text(
+        "".join(f"Package: {p}\nVersion: 1\n\n" for p in ("linux-image-6-m", "u-boot-m", "atf-m")))
+    (Path(t) / "policy.json").write_text(json.dumps(
+        {"own_sources": False, "base": "minimal", "dev": False}))
+    fin = argparse.Namespace(root=t, build=t, target="m")
+    assert "not the U-Boot inside /boot/fip.bin" in dies(c.cmd_finish, fin), "cmd_finish refuses"
+    (boot / "u-boot.bin").write_bytes(UB)
+    c.cmd_finish(fin)
+    assert [p["name"] for p in json.loads((Path(t) / "packages.json").read_text())] == \
+        ["atf-m", "linux-image-6-m", "u-boot-m"], "cmd_finish passes with the matching U-Boot"
+# cib init writes a .gitignore that keeps secrets and output out of git, and keeps an existing one
+with tempfile.TemporaryDirectory() as t:
+    t = Path(t)
+    (t / "cfg/images").mkdir(parents=True)
+    (t / "cfg/images/image-minimal-modalix.yaml").write_text("version: 3.0.0\n")
+    for name in ("ws", "ws3"):
+        (t / name).mkdir()
+    (t / "ws3/.gitignore").write_text("mine\n")
+    for name in ("ws", "ws3"):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            c.cmd_init(argparse.Namespace(dir=str(t / name), flavor="minimal", target="modalix",
+                                          release="3.0.0", configs=str(t / "cfg")))
+    assert (t / "ws/.gitignore").read_text() == c.GITIGNORE and "keys/*.key" in c.GITIGNORE
+    assert (t / "ws3/.gitignore").read_text() == "mine\n", "existing .gitignore kept"
+
+# gen_leaf: a failed certificate swap restores the old key; a good renew changes both
+with tempfile.TemporaryDirectory() as t:
+    t = Path(t)
+    c.gen_keys(t, "ecdsa-p384", "T")
+    k0, c0 = (t / "swu-signing.key").read_bytes(), (t / "swu-signing.crt").read_bytes()
+    real = os.replace
+    for exc in (OSError("disk full"), KeyboardInterrupt()):
+        def flaky(s, d):
+            if str(d).endswith("swu-signing.crt"):
+                raise exc
+            real(s, d)
+        os.replace = flaky
+        try:
+            c.gen_leaf(t, "ecdsa-p384", "T"); raise AssertionError("did not fail")
+        except type(exc):
+            pass
+        finally:
+            os.replace = real
+        assert (t / "swu-signing.key").read_bytes() == k0 and (t / "swu-signing.crt").read_bytes() == c0, exc
+    def late(s, d):
+        real(s, d)
+        if str(d).endswith("swu-signing.crt"):
+            raise KeyboardInterrupt
+    os.replace = late
+    try:
+        c.gen_leaf(t, "ecdsa-p384", "T"); raise AssertionError("did not fail")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        os.replace = real
+    c.check_issued(t / "swu-signing.crt", t / "ca.crt")
+    pair = [subprocess.run(["openssl", k, "-in", t / f, "-noout", "-pubkey"] if k == "x509" else
+                           ["openssl", "pkey", "-in", t / f, "-pubout"], capture_output=True, check=True).stdout
+            for k, f in (("x509", "swu-signing.crt"), ("pkey", "swu-signing.key"))]
+    assert pair[0] == pair[1], "key and certificate match after a late interrupt"
+    k0, c0 = (t / "swu-signing.key").read_bytes(), (t / "swu-signing.crt").read_bytes()
+    c.gen_leaf(t, "ecdsa-p384", "T")
+    assert (t / "swu-signing.key").read_bytes() != k0 and (t / "swu-signing.crt").read_bytes() != c0
+    c.check_issued(t / "swu-signing.crt", t / "ca.crt")
+# gen_leaf: no key copy outlives the run; a leftover from a SIGKILL is swept; signal handlers come back
+import signal
+with tempfile.TemporaryDirectory() as t:
+    t = Path(t)
+    c.gen_keys(t, "ecdsa-p384", "T")
+    (t / ".cib-renew-dead").mkdir(); (t / ".cib-renew-dead/old.key").write_text("old secret")
+    (t / "keep.me").write_text("x")
+    before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)
+    c.gen_leaf(t, "ecdsa-p384", "T")
+    assert not list(t.glob(".cib-renew-*")), "stale and own work dirs removed"
+    assert (t / "keep.me").read_text() == "x" and (t / "ca.key").is_file()
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before, "handlers restored"
+    k0, c0 = (t / "swu-signing.key").read_bytes(), (t / "swu-signing.crt").read_bytes()
+    code = ("import os, signal, sys; sys.path.insert(0, %r); import cib.cli as c; from pathlib import Path\n"
+            "real = os.replace\n"
+            "def hit(s, d):\n"
+            "    os.kill(os.getpid(), signal.SIGTERM); real(s, d)\n"
+            "os.replace = hit\n"
+            "c.gen_leaf(Path(%r), 'ecdsa-p384', 'T')\n") % (str(Path(c.__file__).parent.parent), str(t))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 128 + signal.SIGTERM, (r.returncode, r.stderr)
+    assert not list(t.glob(".cib-renew-*")), "SIGTERM mid-swap leaves no key copy"
+    assert (t / "swu-signing.key").read_bytes() == k0 and (t / "swu-signing.crt").read_bytes() == c0, "old pair intact"
+assert "keys/.cib-renew-*/" in c.GITIGNORE
+# update_modalix.sh: the inactive boot partition is unmounted when postinst fails, and by postfailure
+src = (Path(__file__).resolve().parent.parent / "configs/images/files/update_modalix.sh").read_text()
+snip = src[src.index("\t\tbootmnt=$(mktemp -d)"):src.index("\t\tfatlabel ")]
+func = src[src.index("release_boot() {"):src.index('echo "== Start $1 =="')]
+STUBS = (  # a mount is a marker file M; findmnt lists the last mount point while M exists
+    'mount() {{ echo mount >> $LOG; touch $D/M; }}\n'
+    'umount() {{ echo umount >> $LOG; {ufail} rm -f $D/M "$1"/*; }}\n'
+    'findmnt() {{ [ -f $D/M ] && cat $D/last; return 0; }}\n'
+    'mktemp() {{ d=$(command mktemp -d); echo "$d" > $D/last; {chmod} echo "$d"; }}\n')
+def run_boot(body, fail=False, ufail=False):
+    with tempfile.TemporaryDirectory() as t:
+        D = Path(t)
+        script = (f'set -e\nLOG={D}/log\nD={t}\n: > $LOG\n' + STUBS.format(chmod='ln -s /dev/full "$d/dm-table.env";' if fail else "",
+                  ufail="return 1;" if ufail else "") + 'inactive_boot=/dev/x dmoff=1 dmlen=2 clean_env=1 keep_ddr=0\n'
+                  + func + body + 'echo done >> $LOG\n')
+        r = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        last = (D / "last").read_text().strip() if (D / "last").exists() else ""
+        return r.returncode, (D / "log").read_text().split(), r.stderr, last
+rc, steps, err, last = run_boot(snip)
+assert (rc, steps) == (0, ["mount", "umount", "done"]), "clean run unmounts once and clears the trap"
+assert not os.path.exists(last)
+rc, steps, err, last = run_boot(snip, fail=True)
+assert rc != 0 and steps == ["mount", "umount"], (rc, steps)  # a failed write still unmounts
+assert not os.path.exists(last), "and removes the mount point"
+rc, steps, err, last = run_boot(snip, fail=True, ufail=True)
+assert rc != 0 and "could not unmount" in err and "before retrying" in err, err  # a busy mount is reported
+# postfailure: whatever is still mounted from the inactive boot partition is unmounted first
+fail_part = src[src.index("postfailure)"):]
+assert fail_part.index("\t\trelease_boot\n") < fail_part.index("dd if=/dev/zero"), "postfailure calls release_boot"
+rc, steps, err, last = run_boot('d=$(mktemp -d); mount /dev/x "$d"\nrelease_boot\n')
+assert steps == ["mount", "umount", "done"], steps
+rc, steps, err, last = run_boot("release_boot\n")
+assert (rc, steps) == (0, ["done"]), "nothing mounted: nothing to do"
+# postinst refuses a rootfs slot that is not exactly one linear dm segment
+dmsnip = src[src.index("\t\tdm=$(dmsetup"):src.index("\t\tlvchange", src.index("\t\tdm=$(dmsetup"))]
+for table, ok in (("0 8 linear 179:2 2048", True), ("0 8 linear 179:2 2048\n8 8 linear 179:2 9000", False),
+                  ("0 8 striped 2 128 179:2 0 179:3 0", False), ("", False)):
+    r = subprocess.run(["sh", "-c", 'set -e\nvg=v inactive=B\ndmsetup() { printf "%s" "$DM"; }\n' + dmsnip + 'echo "$dmoff $dmlen"'],
+                       env={**os.environ, "DM": table}, capture_output=True, text=True)
+    assert (r.returncode == 0) == ok and (r.stdout == "2048 8\n" if ok else "not one linear segment" in r.stderr), (table, r)
+# CIB_CREDENTIALS: optional, validated up front, mounted by host/cib, read by base.sh with chpasswd -e
+H = "$6$salt$" + "a" * 20
+def cred(text, name="credentials"):
+    d = tempfile.mkdtemp(); f = Path(d) / name; f.write_text(text); os.environ["CIB_CREDENTIALS"] = str(f); return f
+os.environ.pop("CIB_CREDENTIALS", None)
+import contextlib, io
+with contextlib.redirect_stderr(io.StringIO()) as e:
+    assert c.check_credentials() is None
+assert e.getvalue().startswith("cib: no CIB_CREDENTIALS: root and sima are locked") and e.getvalue().count("\n") == 1, e.getvalue()
+os.environ["CIB_CREDENTIALS"] = "/nonexistent/credentials"; assert "not found" in dies(c.check_credentials)
+LINE, ONE = ":{} must be root:<hash> or sima:<hash> with a $id$ crypt hash, not a password", " must hold exactly one root and one sima line"
+for bad, want in ((f"root:root\nsima:{H}\n", LINE.format(1)), (f"root:{H}\n", ONE), (f"sima:{H}\n", ONE),
+                  (f"root:{H}\nroot:{H}\nsima:{H}\n", ONE), (f"root:{H}\nsima:{H}\nbob:{H}\n", LINE.format(3)),
+                  (f"root:!\nsima:{H}\n", LINE.format(1)), (f"root:{H}\n\nsima:{H}\n", LINE.format(2)),
+                  (f"root:{H} \nsima:{H}\n", LINE.format(1)), ("", ONE)):
+    f = cred(bad); assert dies(c.check_credentials) == f"cib: {f}{want}", (bad, dies(c.check_credentials))
+cred(f"root:{H}\nsima:{H}\n"); c.check_credentials()
+cred(f"sima:{H}\nroot:{H}", "a b"); assert "paths used in hooks" in dies(c.check_credentials), "space in path"
+os.environ.pop("CIB_CREDENTIALS", None)
+# host/cib mounts the file read-only and passes the container path, not the content
+with tempfile.TemporaryDirectory() as t:
+    t = Path(t); (t / "bin").mkdir(); (t / "keys").mkdir()
+    (t / "bin/docker").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n'); (t / "bin/docker").chmod(0o755)
+    (t / "keys/cred.txt").write_text("secret\n")
+    r = subprocess.run([str(Path(__file__).resolve().parent.parent / "host/cib"), "build"], cwd=t,
+                       env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "CIB_CREDENTIALS": str(t / "keys/cred.txt")},
+                       capture_output=True, text=True)
+    args = r.stdout.split("\n")
+    assert f"{t}/keys/cred.txt:/keys/CIB_CREDENTIALS:ro" in args and "CIB_CREDENTIALS=/keys/CIB_CREDENTIALS" in args, args
+    assert "secret" not in r.stdout and not any(a.startswith(f"{t}/keys:") for a in args), "only the file is mounted"
+    for missing in (t / "keys/none", t / "keys"):
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "host/cib"), "sign"], cwd=t, capture_output=True, text=True,
+                           env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "SWU_SIGNING_KEY": str(missing)})
+        assert r.returncode == 1 and r.stdout == "" and f"SWU_SIGNING_KEY: {missing} is not a file" in r.stderr, r
+hook = (Path(__file__).resolve().parent.parent / "configs/images/hooks/base.sh").read_text()
+assert all(" chpasswd" not in ln or "chpasswd -e" in ln for ln in hook.splitlines()), "no password in the hook"
+snip = hook[hook.index("if [ -n \"${CIB_CREDENTIALS"):hook.index("chroot \"$1\" usermod -a -G sima root")].replace('"$1"', "/r")
+def hook_run(env):
+    return subprocess.run(["sh", "-c", 'chroot() { echo "chroot $*"; cat; }\nset -e\n' + snip + 'echo reached'],
+                          env={"PATH": os.environ["PATH"], **env}, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+r = hook_run({})
+assert r.returncode == 0 and r.stdout == "reached\n", r
+f = cred(f"root:{H}\nsima:{H}\n"); os.environ.pop("CIB_CREDENTIALS")
+r = hook_run({"CIB_CREDENTIALS": str(f)})
+assert r.returncode == 0 and r.stdout.split("\n")[0] == "chroot /r chpasswd -e" and f"root:{H}" in r.stdout, r
+# SSH: no root password login, no host keys in the image, each board makes its own on first boot
+base = (Path(__file__).resolve().parent.parent / "configs/images/hooks/base.sh").read_text()
+unit = (Path(__file__).resolve().parent.parent / "configs/images/overlay/simaai/usr/lib/systemd/system/simaai-ssh-hostkeys.service").read_text()
+assert "PermitRootLogin yes" not in base, "root keeps the default prohibit-password"
+assert base.rstrip().endswith('rm -f "$1"/etc/ssh/ssh_host_*'), "host keys removed last, after every package is configured"
+assert 'systemctl enable --root="$1" simaai-ssh-hostkeys' in base
+assert "Before=ssh.service" in unit and "ExecStart=/usr/bin/ssh-keygen -A" in unit and "WantedBy=ssh.service" in unit
 # entrypoint: only "cib build" and a shell get the build set-up; other cib commands run at once
 ep = (Path(__file__).resolve().parent.parent / "entrypoint.sh").read_text()
 case = ep[ep.index('case "${1:-} ${2:-}" in'):ep.index("# --- arm64 emulation")]
@@ -238,6 +530,13 @@ with tempfile.TemporaryDirectory() as t:
         r = subprocess.run(["bash", "-c", case + "echo setup", "ep", *argv], capture_output=True, text=True,
                            env={"PATH": f"{t}:{os.environ['PATH']}"})
         assert r.stdout == want, (argv, r.stdout, r.stderr)
+# update_modalix.sh: preinst drops a boot0.be or OS marker left in /tmp before swupdate writes this bundle's
+pre = src[src.index("preinst)\n"):src.index("postinst)\n")]
+assert pre.index('rm -f "$BOOT0" "$OSMARK"') < pre.index("resolve_slots"), "cleared first"
+with tempfile.TemporaryDirectory() as t:
+    b0, osm = Path(t) / "boot0.be", Path(t) / "os"; b0.write_text("stale"); osm.write_text("stale")
+    r = subprocess.run(["sh", "-c", f'BOOT0={b0} OSMARK={osm}\n' + pre.split("\n", 3)[2] + "\n"], capture_output=True, text=True)
+    assert r.returncode == 0 and not b0.exists() and not osm.exists(), r
 # a missing input file ends in one cib: line, not a traceback
 with tempfile.TemporaryDirectory() as d:
     for argv in (["verify", "--ca", f"{d}/ca.crt", f"{d}/no.swu"], ["diff", "--against", f"{d}/no.json", "--image", f"{d}/no.cdx.json"]):
@@ -274,4 +573,6 @@ with tempfile.TemporaryDirectory() as t:
         assert sign("3.0.0.1") == N.format("3.0.0.1", ""), "only the signed one left: re-sign it"
     finally:
         c.read_swu, c.gen_keys = real_rs, real_gk; os.chdir(here)
+if "FIT_SKIPPED" in globals():
+    sys.exit("the FIT asserts did not run: mkimage, dtc or openssl missing; the other asserts passed")
 print("ALL CLI ASSERTS PASSED")

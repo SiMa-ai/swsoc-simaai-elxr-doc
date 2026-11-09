@@ -18,16 +18,27 @@ SiMa.ai SDK manual:
 | `configs/images/` | Image configs for each flavor (`image-{minimal,palette,securepalette}-modalix.yaml`), with the stage list, params, hooks, overlay and SWU files they use |
 | `scripts/` | The two build helper scripts the stages call |
 | `UPSTREAM` | What the configs were taken from (the SiMa.ai 3.0.0 image configs, the eLxr config tool commit) and how they differ |
+| `sdk-manual.rst`, `images/`, `Dockerfile.modalix` | The SiMa.ai SDK manual, its figures, and the SDK container it describes (not part of CIB) |
 
-Only the `minimal` flavor has been built end to end. Not implemented:
-`cib mirror`, `--offline`, `--from` (an offline build will need another
-way to check the `boot0.be` md5). Secure-boot flavors and
-fused boards have not been tested; for `securepalette` the kernel FIT signature is
-not checked against the key in the image's U-Boot.
+The `minimal` and `palette` flavors have been built end to end; `securepalette` has not,
+and no fused (secure-boot) board has been tested. A build needs network access to the
+package repositories. A `securepalette` build checks the kernel FIT signature against
+the keys in the image's U-Boot. The 3.0.0 packages are signed with the development key
+`dev`, so with them `securepalette` builds only with `--dev`, and a `--dev` bundle cannot
+be signed for shipping: a shippable `securepalette` needs kernel, U-Boot and ATF packages
+signed with a production key.
 
 The base image is pinned by digest and the debsbom wheels are checked against hashes;
 the pasha wheel in `dist/` and the `cib` package are installed without a hash check. The eLxr apt packages (rucksack, mmdebstrap, qemu) are whatever the eLxr
 mirror serves when the image is built.
+
+Builds run with `SOURCE_DATE_EPOCH` set to the `Date` of SiMa.ai's signed package index
+(`InRelease`), read when the container image is built; its `Valid-Until` is not checked.
+File times in an image do not depend on the build day. Two builds of one workspace in the
+same container image give the same `boot.vfat.gz` while SiMa.ai's index and the mirrors are
+unchanged; a container image rebuilt after SiMa.ai
+republishes the index may not. The root file system still differs in `/etc/buildinfo` (build
+date and time).
 
 More detail: [customer guide](docs/customer-guide.md) (keys, moving a board to your
 keys, version rule, rollback, host side effects) and
@@ -92,7 +103,7 @@ mounted alone, read-only.
    only debs signed by the key in `debs.key`:
 
    ```bash
-   cib sign-deb custom-debs/u-boot-modalix_2.2.0_arm64.deb
+   cib sign-deb custom-debs/my-app_1.0_arm64.deb
    ```
 
    This writes `<deb>.sig`. `cib verify-debs` re-checks them.
@@ -168,11 +179,19 @@ mounted alone, read-only.
 - `custom-debs/` must be arm64 or all, signed by `debs.key`, hold no `troot-*`
   or `atf-*` package (tRoot and ATF are SiMa.ai's) and no second kernel or U-Boot. The image must end up with exactly one
   kernel, one U-Boot and one ATF package.
+- `/boot/u-boot.bin` must be the U-Boot inside `/boot/fip.bin`. The board boots the
+  one in `fip.bin`, which the ATF package carries and CIB does not rebuild, so a
+  `u-boot-modalix` in `custom-debs/` with a different `u-boot.bin` fails the build.
 - `boot0.be` in the bundle must have the md5 listed for `boot/Release/boot0.be` in the
   `md5sums` of the tRoot package the image installs (`troot-modalix`, or
   `troot-modalix-secure` for `securepalette`; downloaded from the SiMa.ai release apt line,
   which is the `sima_source` line when you set one), or the build fails with `md5 check failed for boot0.be`. This needs network
   access to that repo.
+- `securepalette` only: the default configuration of `/boot/fitImage` must be signed
+  (sha256, RSA, PKCS#1 v1.5) by every key marked `required = "conf"` in the device
+  trees of `/boot/u-boot.bin` and `/boot/fip.bin`, the signature must cover the
+  configuration and its images, and each image must match its hash. The build
+  refuses the development key (`key-name-hint = "dev"`) unless `--dev` is given.
 - Custom debs are pinned (priority 1001) so `apt upgrade` leaves them alone.
 - The image carries `/etc/swupdate.cfg` (`public-key-file` and
   `no-downgrading = "<version>"`) and `/usr/bin/simaai-update`, which installs a

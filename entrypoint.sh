@@ -13,7 +13,9 @@
 #   - a local apt repo at http://localhost/deb/custom holding every .deb in
 #     /workspace/custom-debs, signed with a key made for this run alone; the
 #     image's apt pinning ranks it above SiMa.ai's repo, so a customer
-#     kernel or U-Boot replaces SiMa.ai's
+#     kernel replaces SiMa.ai's
+#   - SOURCE_DATE_EPOCH from /etc/cib-release-epoch (the release's package
+#     index date, read when the image was built), for reproducible file times
 #
 # Inputs (environment):
 #   CIB_CODENAME     - suite the repo publishes (set by the Dockerfile)
@@ -102,4 +104,5 @@ if ! pgrep -x nginx >/dev/null 2>&1; then
     nginx
 fi
 
+export SOURCE_DATE_EPOCH="$(cat /etc/cib-release-epoch)"
 exec "$@"

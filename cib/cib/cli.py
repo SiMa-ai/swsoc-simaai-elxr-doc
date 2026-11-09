@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -579,6 +580,7 @@ def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
 
     swu = cfg.get("swu") or {}
     (ws / "build/policy.json").write_text(json.dumps({
+        "base": base, "dev": version.endswith("-dev"),
         "own_sources": bool(cfg.get("sima_source") or cfg.get("sources"))}))
     script = "update_modalix.sh"
     if swu.get("script"):
@@ -1024,6 +1026,190 @@ def cmd_verify(a):
     print(f"cib: {a.swu} OK ({count} artifacts verified)")
 
 
+# ---- kernel FIT signature (securepalette) -----------------------------------
+
+FDT_MAGIC = b"\xd0\x0d\xfe\xed"
+FIT_EXC = ("data", "data-size", "data-position", "data-offset")  # never part of the signed hash
+SHA256_DER = bytes.fromhex("3031300d060960864801650304020105000420")  # PKCS#1 DigestInfo prefix
+
+
+def fdt_parse(b):
+    """(nodes, tags, strings offset, total size) of a device tree blob: nodes is
+    {path: {property: bytes}}, tags [(tag, offset, next, name)] in the struct block."""
+    magic, total, off_struct, off_strings, _, _, _, _, _, size_struct = struct.unpack(">10I", b[:40])
+    if magic != 0xd00dfeed or total > len(b):
+        raise ValueError("not a device tree")
+    s = b[off_struct:off_struct + size_struct]
+    nodes, tags, path, o = {}, [], [], 0
+    while True:
+        tag, n, name = int.from_bytes(s[o:o + 4], "big"), o + 4, None
+        if tag == 1:    # begin node: name, NUL, padded to 4 bytes
+            end = s.index(b"\0", n)
+            path.append(s[n:end].decode())
+            name, n = "/" + "/".join(path[1:]), (end + 4) & ~3
+            nodes[name] = {}
+        elif tag == 2:  # end node
+            path.pop()
+        elif tag == 3:  # property: length, name offset, value padded to 4 bytes
+            ln, nameoff = struct.unpack(">2I", s[n:n + 8])
+            strings = b[off_strings + nameoff:]
+            name = strings[:strings.index(b"\0")].decode()
+            nodes["/" + "/".join(path[1:])][name] = s[n + 8:n + 8 + ln]
+            n = (n + 8 + ln + 3) & ~3
+        elif tag not in (4, 9) or n > len(s):
+            raise ValueError("bad device tree structure")
+        tags.append((tag, o, n, name))
+        if tag == 9:
+            return nodes, tags, off_struct, off_strings, total
+        o = n
+
+
+def fit_regions(tags, inc):
+    """Struct-block byte ranges U-Boot hashes for a signature over the nodes in inc
+    (the same walk as its fdt_find_regions)."""
+    out, start, want, stack = [], None, 0, []
+    for tag, off, nxt, name in tags:
+        stop = nxt
+        if tag in (3, 4):
+            include, stop = want >= 2 and name not in FIT_EXC, off
+        elif tag == 1:
+            stack.append(want)
+            if want == 1 or (name not in inc and not want):
+                stop = off
+            want = 2 if name in inc else max(want - 1, 0)
+            include = want
+        elif tag == 2:
+            include, want = want, stack.pop()
+        else:
+            include = True
+        if include and start is None:
+            start = off
+        if not include and start is not None:
+            out.append((start, stop))
+            start = None
+    out.append((start, tags[-1][2]))
+    return out
+
+
+def text(prop):
+    return (prop or b"").rstrip(b"\0").decode(errors="replace")
+
+
+def required_keys(*blobs):
+    """{modulus: (name hint, exponent)} of every key marked required = "conf" in the
+    device trees embedded in the given U-Boot images."""
+    keys = {}
+    for b in blobs:
+        for m in re.finditer(re.escape(FDT_MAGIC), b):
+            try:
+                nodes = fdt_parse(b[m.start():])[0]
+            except (ValueError, IndexError, struct.error, UnicodeDecodeError):
+                continue
+            for path, props in nodes.items():
+                if path.startswith("/signature/") and text(props.get("required")) == "conf" \
+                        and "rsa,modulus" in props:
+                    keys[props["rsa,modulus"]] = (
+                        text(props.get("key-name-hint")),
+                        int.from_bytes(props.get("rsa,exponent", b"\x01\x00\x01"), "big"))
+    return keys
+
+
+def fit_check(fit, keys):
+    """Die unless the FIT's default configuration is signed by every key in keys, the
+    signature covers the configuration and its images, and each image matches its hash."""
+    try:
+        nodes, tags, off_struct, off_strings, total = fdt_parse(fit)
+    except (ValueError, IndexError, struct.error, UnicodeDecodeError) as ex:
+        die(f"the kernel fitImage is not a FIT: {ex}")
+    conf = "/configurations/" + text(nodes.get("/configurations", {}).get("default"))
+    if conf not in nodes:
+        die("the kernel fitImage has no default configuration")
+    if f"/images/{text(nodes[conf].get('kernel'))}" not in nodes:
+        die("the kernel fitImage's default configuration has no kernel")
+    images = sorted({f"/images/{v}" for k, val in nodes[conf].items() if k != "description"
+                     for v in text(val).split("\0") if f"/images/{v}" in nodes})
+    sigs = [p for p, props in nodes.items()
+            if p.startswith(conf + "/") and "value" in props and "hashed-nodes" in props]
+    for modulus, (hint, exponent) in keys.items():
+        for sig in sigs:
+            props = nodes[sig]
+            if text(props.get("algo")).split(",")[0] != "sha256" or \
+                    text(props.get("padding")) not in ("", "pkcs-1.5"):
+                continue  # only sha256 with PKCS#1 v1.5 padding is checked here
+            inc = text(props["hashed-nodes"]).split("\0")
+            h = hashlib.sha256()
+            for a, z in fit_regions(tags, inc):
+                h.update(fit[off_struct + a:off_struct + z])
+            if "hashed-strings" in props:
+                h.update(fit[off_strings:off_strings + int.from_bytes(props["hashed-strings"][4:8], "big")])
+            k = len(modulus)
+            want = b"\x00\x01" + b"\xff" * (k - 3 - len(SHA256_DER) - 32) + b"\x00" + SHA256_DER + h.digest()
+            got = pow(int.from_bytes(props["value"], "big"), exponent, int.from_bytes(modulus, "big"))
+            if got.to_bytes(k, "big") != want:
+                continue
+            hashes = [p for p in nodes if "value" in nodes[p] and p.rsplit("/", 1)[0] in images]
+            missing = [n for n in (conf, *images, *hashes) if n not in inc]
+            if missing:
+                die(f"the kernel FIT signature does not cover {', '.join(missing)}")
+            break
+        else:
+            die(f"the kernel fitImage is not signed by U-Boot's required key {hint!r}; "
+                "a secure-boot board would not boot it")
+    for img in images:
+        props = nodes[img]
+        if "data" in props:
+            data = props["data"]
+        else:  # external data: absolute, or relative to the end of the tree (4-aligned)
+            size = int.from_bytes(props.get("data-size", b""), "big")
+            pos = int.from_bytes(props["data-position"], "big") if "data-position" in props \
+                else ((total + 3) & ~3) + int.from_bytes(props.get("data-offset", b""), "big")
+            data = fit[pos:pos + size]
+        hs = [h for hp, h in nodes.items() if hp.startswith(img + "/hash") and "value" in h
+              and text(h.get("algo")) in hashlib.algorithms_guaranteed]  # crc32 and the like are skipped
+        if not hs:
+            die(f"the kernel fitImage: {img} has no hash that can be checked")
+        for h in hs:
+            if hashlib.new(text(h["algo"]), data).digest() != h["value"]:
+                die(f"the kernel fitImage: {img} does not match its {text(h['algo'])} hash")
+
+
+FIP_MAGIC = 0xAA640001
+BL33_UUID = bytes.fromhex("d6d0eea7fcead54b97829934f234b6e4")
+
+
+def fip_bl33(fip):
+    """The U-Boot (BL33) image inside a firmware image package, None if it has none."""
+    if len(fip) < 16 or struct.unpack_from("<I", fip)[0] != FIP_MAGIC:
+        return None
+    for off in range(16, len(fip) - 39, 40):  # 16-byte header, 40-byte entries
+        uuid, pos, size = struct.unpack_from("<16sQQ", fip, off)
+        if uuid == BL33_UUID:
+            return fip[pos:pos + size] if pos + size <= len(fip) else None
+        if uuid == bytes(16):
+            break
+    return None
+
+
+def check_fip_uboot(root):
+    """The board boots the U-Boot inside fip.bin; u-boot.bin must be that one."""
+    boot = Path(root) / "boot"
+    if fip_bl33((boot / "fip.bin").read_bytes()) != (boot / "u-boot.bin").read_bytes():
+        die("/boot/u-boot.bin is not the U-Boot inside /boot/fip.bin; the board boots the "
+            "one in fip.bin, which the ATF package carries, so this U-Boot would not run")
+
+
+def check_secure_boot(root, dev):
+    """securepalette: the kernel FIT must verify against the keys U-Boot requires."""
+    boot = Path(root) / "boot"
+    keys = required_keys((boot / "u-boot.bin").read_bytes(), (boot / "fip.bin").read_bytes())
+    if not keys:
+        die("U-Boot holds no required FIT key; a secure-boot board would not verify the kernel")
+    if not dev and any(hint == "dev" for hint, _ in keys.values()):
+        die("U-Boot trusts the development FIT key 'dev'; securepalette builds with it "
+            "need --dev (a production key comes with SiMa.ai's ATF and U-Boot packages)")
+    fit_check((boot / "fitImage").read_bytes(), keys)
+
+
 # ---- build-time hook and cleanup ------------------------------------------
 
 ORIGINS = ("customer", "sima", "elxr", "debian")
@@ -1091,6 +1277,7 @@ def cmd_finish(a):
     for f in ("fip.bin", "u-boot.bin", "fitImage"):
         if not (root / "boot" / f).is_file() or not (root / "boot" / f).stat().st_size:
             die(f"the image lacks /boot/{f}; the boot partition would be incomplete")
+    check_fip_uboot(root)
     sets = sorted(d.name for d in (root / "lib").glob("linux-image-*") if d.is_dir())
     if len(sets) != 1:
         die(f"the boot partition would mix kernel/DTB sets: {', '.join(sets) or 'none'}")
@@ -1099,6 +1286,8 @@ def cmd_finish(a):
     if not policy["own_sources"] and any(p["origin"] != "sima" for p in troot):
         die("the tRoot package must come from SiMa.ai's repo, not "
             f"{', '.join(p['origin'] for p in troot)}")
+    if policy["base"] == "securepalette":
+        check_secure_boot(root, policy["dev"])
     atf = [p for p in out if p["name"].startswith("atf-")]
     if not policy["own_sources"] and any(p["origin"] != "sima" for p in atf):
         die("the ATF package must come from SiMa.ai's repo, not "

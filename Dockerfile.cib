@@ -6,8 +6,8 @@
 #
 # Assembles Modalix eLxr images (rootfs, disk image, signed .swu) from
 # SiMa.ai's public apt repository plus the customer's own .debs (kernel,
-# U-Boot, extra packages). It builds no packages and needs nothing from
-# SiMa.ai beyond that repository: no package sources or cross toolchains are included
+# extra packages). It builds no packages and needs nothing from SiMa.ai
+# beyond that repository: no package sources or cross toolchains are included
 # (eLxr's python3-rucksack does pull in a native build-essential).
 #
 # Build context is this directory. dist/ holds the SiMa.ai pasha wheel
@@ -140,6 +140,13 @@ RUN export GNUPGHOME="$(mktemp -d)" && \
     fi && \
     gpg --dearmor < /tmp/simaai-public.asc > /usr/share/keyrings/simaai-public.gpg && \
     rm -r /tmp/simaai-public.asc "$GNUPGHOME"
+
+# Date of the release's signed package index, exported by the entrypoint as
+# SOURCE_DATE_EPOCH so file times in an image do not depend on the build day.
+RUN wget -q -O /tmp/InRelease "${SIMAAI_APT_URL}/dists/${CODENAME}/InRelease" && \
+    gpgv --keyring /usr/share/keyrings/simaai-public.gpg /tmp/InRelease && \
+    date -u -d "$(sed -n 's/^Date: //p' /tmp/InRelease)" +%s > /etc/cib-release-epoch && \
+    rm /tmp/InRelease
 
 # Local apt repo layout, served by nginx at http://localhost/deb/custom.
 # No signing key is baked in: entrypoint.sh creates a fresh one on every container run, so

@@ -135,16 +135,26 @@ unable to boot.
 
 ## Boot chain you supply
 
-You can replace the kernel and U-Boot with your own `.deb` files in `custom-debs/`.
+You can replace the kernel with your own `.deb` file in `custom-debs/`.
 ATF and tRoot hold the root of trust and come from SiMa.ai: the build refuses an
-`atf-*` or `troot-*` package in `custom-debs/`. Keep SiMa.ai's package names
-(`linux-image-6.18.3-modalix`, `u-boot-modalix`) with a higher version. The flavor's package list installs
+`atf-*` or `troot-*` package in `custom-debs/`. U-Boot cannot be replaced this way:
+the board boots the U-Boot inside `/boot/fip.bin`, which the ATF package carries and
+CIB does not rebuild, so the build fails when `/boot/u-boot.bin` is not that one.
+Keep SiMa.ai's kernel package name (`linux-image-6.18.3-modalix`) with a higher version. The flavor's package list installs
 `linux-image-6.18.3-modalix*`, so a kernel with another name is either not installed
 or (if it matches that pattern or is listed in `packages.add`) a second one.
 The image must end up with exactly one kernel, U-Boot and ATF package, with `/boot/fip.bin`, `/boot/u-boot.bin`
 and `/boot/fitImage` present and a single `lib/linux-image-*` directory. Your debs are
-pinned so `apt upgrade` on a board leaves them alone. CIB does not handle FIT or
-secure-boot keys, and boards with verified boot are not covered.
+pinned so `apt upgrade` on a board leaves them alone.
+
+CIB does not sign kernels: signing belongs to the package build. On
+`securepalette`, where U-Boot enforces the kernel FIT signature, the build checks that
+the image's `fitImage` verifies against the keys its U-Boot requires, and fails
+instead of producing a bundle that will not boot. SiMa.ai's release packages are
+signed with a development key named `dev`; a `securepalette` build that still trusts
+it is refused unless you pass `--dev`, and a `--dev` bundle cannot be signed for shipping.
+A shippable `securepalette` needs packages signed with a production key. Fused boards have
+not been tested.
 
 ## What the image does with SWUpdate
 
