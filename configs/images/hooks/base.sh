@@ -1,20 +1,19 @@
 #!/bin/sh
 # Common rootfs customization. $1 = rootfs directory.
-# Parameters via environment: PLATFORM, VERSION, CODENAME, BUILD, BUILD_TYPE,
-# CURRENT_DIR.
+# Parameters via environment: PLATFORM, VERSION, CODENAME, BUILD,
+# CIB_CREDENTIALS, CURRENT_DIR.
 # Consumed by the mmdebstrap customize hooks (image-params.yaml).
 set -e
 chroot "$1" groupadd sima
 chroot "$1" groupadd -f tracing
 chroot "$1" groupadd -f i2c
-chroot "$1" useradd -m -g sima -G sudo,audio,video,tracing,i2c sima
+chroot "$1" useradd -m -s /bin/bash -g sima -G sudo,audio,video,tracing,i2c sima
 # root and sima passwords: crypt hashes, one user:hash line each, from outside the repo.
 # Without them both stay locked, as the base system and useradd leave them.
 if [ -n "${CIB_CREDENTIALS:-}" ]; then
 	chroot "$1" chpasswd -e < "$CIB_CREDENTIALS"
 fi
 chroot "$1" usermod -a -G sima root
-chroot "$1" usermod -s /bin/bash sima
 echo "${PLATFORM}" > "$1/etc/hostname"
 # The rootfs is a logical volume in the "Boot A/B + LVM" layout, so the
 # spare eMMC space goes to the data volume instead of to /. elxr-growfs walks
@@ -48,8 +47,7 @@ systemctl --root="$1" mask swupdate.service swupdate.socket
 systemctl disable --root="$1" swupdate-progress.service
 # e2scrub takes a snapshot to check a mounted file system, and growlvm hands
 # every spare extent to data, so there is never room for one.
-systemctl disable --root="$1" e2scrub_reap.service
-systemctl disable --root="$1" e2scrub_all.timer
+systemctl disable --root="$1" e2scrub_reap.service e2scrub_all.timer
 chroot "$1" chown -R sima /home/sima
 # Mount point for the persistent data logical volume, which every flavor's
 # fstab now carries.
@@ -75,8 +73,7 @@ prune_localhost() {
 		;;
 	esac
 }
-prune_localhost "$1/etc/apt/sources.list"
-for src in "$1"/etc/apt/sources.list.d/*.list "$1"/etc/apt/sources.list.d/*.sources; do
+for src in "$1"/etc/apt/sources.list "$1"/etc/apt/sources.list.d/*.list "$1"/etc/apt/sources.list.d/*.sources; do
 	prune_localhost "$src"
 done
 # The SiMa.ai source line stays in the image and names this keyring as its

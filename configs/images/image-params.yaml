@@ -228,7 +228,7 @@ write_a: ${params.wroot_a}
 write_ab: ${concat:${params.wroot_a},${params.wroot_b}}
 
 hbase:
-- PLATFORM=${platform} VERSION=${version} CODENAME=${codename} BUILD=${oc.env:BUILD, 0} BUILD_TYPE=${oc.env:BUILD_TYPE, custom} CIB_CREDENTIALS=${oc.env:CIB_CREDENTIALS,''} CURRENT_DIR=${oc.env:CURRENT_DIR} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/base.sh $1
+- PLATFORM=${platform} VERSION=${version} CODENAME=${codename} BUILD=${oc.env:BUILD, 0} CIB_CREDENTIALS=${oc.env:CIB_CREDENTIALS,''} CURRENT_DIR=${oc.env:CURRENT_DIR} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/base.sh $1
 hminimal:
 - sh ${oc.env:CURRENT_DIR}/configs/images/hooks/minimal.sh $1
 hpalette:

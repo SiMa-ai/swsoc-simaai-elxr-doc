@@ -137,9 +137,9 @@ unable to boot.
 
 You can replace the kernel with your own `.deb` file in `custom-debs/`.
 ATF and tRoot hold the root of trust and come from SiMa.ai: the build refuses an
-`atf-*` or `troot-*` package in `custom-debs/`. U-Boot cannot be replaced this way:
+`atf-*` or `troot-*` package in `custom-debs/`. It also refuses `u-boot-modalix`:
 the board boots the U-Boot inside `/boot/fip.bin`, which the ATF package carries and
-CIB does not rebuild, so the build fails when `/boot/u-boot.bin` is not that one.
+CIB does not rebuild.
 Keep SiMa.ai's kernel package name (`linux-image-6.18.3-modalix`) with a higher version. The flavor's package list installs
 `linux-image-6.18.3-modalix*`, so a kernel with another name is either not installed
 or (if it matches that pattern or is listed in `packages.add`) a second one.

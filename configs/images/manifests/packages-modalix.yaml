@@ -1,13 +1,10 @@
 ---
-net-tools
-procps
 alsa-utils
 tar
 bzip2
 zip
 unzip
 gzip
-dosfstools
 e2fsprogs
 ethtool
 findutils
@@ -16,7 +13,6 @@ pciutils
 usbutils
 nvme-cli
 python3
-python3-pip
 python3-numpy
 python3-opencv
 python3-setuptools

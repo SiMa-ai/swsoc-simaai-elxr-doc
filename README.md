@@ -177,11 +177,10 @@ mounted alone, read-only.
 ## What the build checks and produces
 
 - `custom-debs/` must be arm64 or all, signed by `debs.key`, hold no `troot-*`
-  or `atf-*` package (tRoot and ATF are SiMa.ai's) and no second kernel or U-Boot. The image must end up with exactly one
+  or `atf-*` package (tRoot and ATF are SiMa.ai's), no `u-boot-<target>` and no second kernel. The image must end up with exactly one
   kernel, one U-Boot and one ATF package.
 - `/boot/u-boot.bin` must be the U-Boot inside `/boot/fip.bin`. The board boots the
-  one in `fip.bin`, which the ATF package carries and CIB does not rebuild, so a
-  `u-boot-modalix` in `custom-debs/` with a different `u-boot.bin` fails the build.
+  one in `fip.bin`, which the ATF package carries and CIB does not rebuild.
 - `boot0.be` in the bundle must have the md5 listed for `boot/Release/boot0.be` in the
   `md5sums` of the tRoot package the image installs (`troot-modalix`, or
   `troot-modalix-secure` for `securepalette`; downloaded from the SiMa.ai release apt line,

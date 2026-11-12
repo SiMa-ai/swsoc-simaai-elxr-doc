@@ -10,13 +10,14 @@ build=$4
 codename=$5
 branch=$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo cib)
 
-echo "-----------------------" > $build_file
-echo "Build Configuration:  |" >> $build_file
-echo "-----------------------" >> $build_file
-echo "DISTRO = eLxr" >> $build_file
-echo "DISTRO_VERSION = $version" >> $build_file
-echo "CODENAME = $codename" >> $build_file
-echo "MACHINE = $platform" >> $build_file
-echo "DATE = $(date +%Y%m%d)" >> $build_file
-echo "TIME = $(date +%H%M%S)" >> $build_file
-echo "SIMA_BUILD_VERSION = ${version}_${branch}_B${build}" >> $build_file
+cat > "$build_file" <<EOF
+-----------------------
+Build Configuration:  |
+-----------------------
+DISTRO = eLxr
+DISTRO_VERSION = $version
+CODENAME = $codename
+MACHINE = $platform
+$(date +'DATE = %Y%m%d%nTIME = %H%M%S')
+SIMA_BUILD_VERSION = ${version}_${branch}_B${build}
+EOF

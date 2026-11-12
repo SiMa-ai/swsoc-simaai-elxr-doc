@@ -38,11 +38,8 @@ LICENSE_PATTERNS = {
         r"\`AS IS\'" : "AS-IS",
 }
 
-package_names = []
-
 def extract_licenses(copyright_path):
     licenses = set()
-    content = ""
 
     try:
         with open(copyright_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -59,11 +56,9 @@ def extract_licenses(copyright_path):
 
     # ---------- Non-DEP5 heuristic ----------
     if not licenses:
-        for pattern in LICENSE_PATTERNS.keys():
-            for match in re.findall(pattern, content, flags=re.IGNORECASE):
-                licenses.add(str(LICENSE_PATTERNS.get(pattern)))
+        licenses = {name for pat, name in LICENSE_PATTERNS.items() if re.search(pat, content, re.I)}
 
-    return licenses if licenses else None
+    return licenses or None
 
 def usage():
     print("Usage: python3 extract_licenses.py <input manifest file> <output license file> <path for copyright files>")
@@ -83,21 +78,10 @@ if __name__ == "__main__":
          open(output_file, "w", encoding="utf-8") as out:
         for line in f:
             # Package rows usually start with 'ii'
-            if line.startswith("ii"):
-                parts = line.split()
-                if len(parts) >= 2:
-                    package_names.append(parts[1].split(":")[0])
-
-        for pkg in package_names:
-            pkg = pkg.strip()
-            if not pkg:
+            if not (line.startswith("ii") and len(parts := line.split()) >= 2):
                 continue
-
-            copyright_file = os.path.join(
-                doc_root, pkg, "copyright"
-            )
-
-            licenses = extract_licenses(copyright_file)
+            pkg = parts[1].split(":")[0]
+            licenses = extract_licenses(os.path.join(doc_root, pkg, "copyright"))
 
             if licenses is None:
                 out.write(f"{pkg}: NOT FOUND\n")

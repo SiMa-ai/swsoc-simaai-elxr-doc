@@ -21,20 +21,16 @@ import yaml
 from cib import __version__
 
 DEBS = "custom-debs"
-IMAGES = Path("configs/images")
 BAKED_CONFIGS = Path("/usr/share/cib/configs")  # the image configs shipped in the container
-DEVDIR = Path("/dev")
 VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)")  # use fullmatch
-# Paths that end up in a YAML plain scalar and a shell command line.
 # image.yaml fields and the type each must have (release/version/slots may be numbers).
 FIELDS = {"base": str, "target": str, "release": (str, int, float), "version": (str, int, float),
           "slots": (str, int, float), "packages": dict, "overlay": str, "hooks": list,
           "signing": dict, "debs": dict, "vendor": (str, int, float), "swu": dict,
-          "sources": list, "sima_source": str,
-          "encryption": dict}
+          "sources": list, "sima_source": str, "encryption": dict}
 AES_KEY_RE = re.compile(r"[0-9a-f]{64} [0-9a-f]{32}")  # swupdate -K file: <key> <ivt>
 ENCRYPTED = ("rootfs.ext4.gz", "boot.vfat.gz")  # the payloads cib sign --encrypt covers
-SAFE_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")
+SAFE_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")  # paths that go into YAML and a shell command line
 # Repo-root items the image hooks reach through CURRENT_DIR or symlinks.
 REPO_ITEMS = ("elxr-config", "scripts/build_scripts/prepare_buildinfo.sh",
               "scripts/extract_licenses.py")
@@ -88,11 +84,9 @@ def die(msg):
 
 
 def run(cmd, **kw):
-    kw.setdefault("text", True)
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, **kw)
+    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, **kw)
     if r.returncode:
-        err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode()
-        die(f"{cmd[0]} failed: {err.strip()}")
+        die(f"{cmd[0]} failed: {r.stderr.strip()}")
     return r.stdout
 
 
@@ -192,14 +186,13 @@ def gen_keys(out, algo="rsa4096", cn="Customer"):
     gen_leaf(out, algo, cn)
 
 
-def gpg(home, *args, **kw):
-    return run(["gpg", "--batch", "--homedir", home, *args], **kw)
+def gpg(home, *args):
+    return run(["gpg", "--batch", "--homedir", home, *args])
 
 
 @contextlib.contextmanager
 def gpg_home():
     with tempfile.TemporaryDirectory() as h:
-        os.chmod(h, 0o700)
         try:
             yield h
         finally:
@@ -369,21 +362,26 @@ def load_config(ws):
     return cfg
 
 
-def check_deb_signature(deb, keyfile):
-    """Die unless deb has a valid detached <deb>.sig from the key in keyfile."""
-    sig = Path(f"{deb}.sig")
-    if not sig.is_file():
-        die(f"{deb.name} is not signed: {sig.name} not found")
+def check_deb_signature(debs, keyfile):
+    """Die unless each deb has a valid detached <deb>.sig from the key in keyfile."""
     fpr = key_fingerprint(keyfile)
     with gpg_home() as h:
         gpg(h, "--import", keyfile)
-        r = subprocess.run(["gpg", "--batch", "--homedir", h, "--status-fd", "1",
-                            "--verify", str(sig), str(deb)],
-                           capture_output=True, text=True)
-    valid = [ln.split() for ln in r.stdout.splitlines()
-             if ln.startswith("[GNUPG:] VALIDSIG")]
-    if r.returncode or not valid or valid[0][-1].upper() != fpr.upper():
-        die(f"{deb.name} is not signed by the customer key {fpr}")
+        for deb in debs:
+            sig = Path(f"{deb}.sig")
+            if not sig.is_file():
+                die(f"{deb.name} is not signed: {sig.name} not found")
+            r = subprocess.run(["gpg", "--batch", "--homedir", h, "--status-fd", "1",
+                                "--verify", str(sig), str(deb)],
+                               capture_output=True, text=True)
+            valid = [ln.split() for ln in r.stdout.splitlines()
+                     if ln.startswith("[GNUPG:] VALIDSIG")]
+            good = any(ln.startswith("[GNUPG:] GOODSIG") for ln in r.stdout.splitlines())
+            if r.returncode or not good or len(valid) != 1 or valid[0][-1].upper() != fpr.upper():
+                die(f"{deb.name} is not signed by the customer key {fpr}")
+
+
+ROOTS = (("troot-", "tRoot"), ("atf-", "ATF"))  # roots of trust: only SiMa.ai's repo supplies them
 
 
 def boot_chain(target):
@@ -398,22 +396,24 @@ def check_debs(ws, cfg):
     key and arm64 or all."""
     debs = sorted((ws / DEBS).glob("*.deb"))
     keyfile = (cfg.get("debs") or {}).get("key")
-    if debs and not keyfile:
-        die("custom .debs must be signed: set debs.key in image.yaml")
+    if debs:
+        if not keyfile:
+            die("custom .debs must be signed: set debs.key in image.yaml")
+        check_deb_signature(debs, ws / keyfile)
     found = []
     for deb in debs:
-        check_deb_signature(deb, ws / keyfile)
-        def field(name):
-            return run(["dpkg-deb", "-f", deb, name]).strip()
-        arch = field("Architecture")
+        f = dict(ln.split(": ", 1) for ln in run(["dpkg-deb", "-f", deb, "Package", "Version",
+                                                  "Architecture"]).splitlines() if ": " in ln)
+        arch, pkg = f.get("Architecture", ""), f.get("Package", "")
         if arch not in ("arm64", "all"):
             die(f"{deb.name} is for {arch}, not arm64")
-        found.append((field("Package"), field("Version")))
-    for pkg, _ in found:
-        if pkg.startswith("troot-"):
-            die(f"{pkg}: tRoot comes from SiMa.ai's repo and cannot be replaced")
-        if pkg.startswith("atf-"):  # root of trust: needs the customer's own eFuse keys
-            die(f"{pkg}: ATF comes from SiMa.ai's repo and cannot be replaced")
+        for pre, what in ROOTS:
+            if pkg.startswith(pre):
+                die(f"{pkg}: {what} comes from SiMa.ai's repo and cannot be replaced")
+        if pkg == f"u-boot-{cfg['target']}":
+            die(f"{pkg}: the board runs the U-Boot inside fip.bin from SiMa.ai's ATF package, "
+                "so a custom U-Boot would be refused at the end of the build")
+        found.append((pkg, f.get("Version", "")))
     for label, pat in boot_chain(cfg["target"]):
         same = [p for p, _ in found if re.match(pat, p)]
         if len(same) > 1:
@@ -454,26 +454,25 @@ def check_description(text, members):
     for ph in ("@@VERSION@@", "@@HW_COMPAT@@"):
         if ph not in plain:
             die(f"swu.description lacks {ph}")
-    names = []
-    for name, digest in artifacts(text):
+    arts = list(artifacts(text))
+    for name, digest in arts:
         if name not in members:
             die(f"swu.description installs {name}, which the bundle does not carry")
         if digest != f"@@{name}@@".lower():
             die(f"swu.description: sha256 of {name} must be @@{name}@@")
-        names.append(name)
-    if "boot0.be" not in names:
+    if "boot0.be" not in dict(arts):
         die("swu.description must install boot0.be")
 
 
-def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
+def write_effective(ws, cfg, version, trust, debs, aes_key):
     """Write cib-* copies of the reference flavor, params and stages.
 
-    trust, if given, is installed in the rootfs as /etc/swupdate/swupdate.crt
+    trust is installed in the rootfs as /etc/swupdate/swupdate.crt
     with an /etc/swupdate.cfg that uses it and refuses older versions; debs
     (package, version) are pinned so apt leaves them in place; aes_key (a key
     file) is installed for swupdate to decrypt encrypted bundles.
     """
-    img = ws / IMAGES
+    img = ws / "configs/images"
     base = cfg["base"]
     flavor_f = img / f"image-{base}-{cfg['target']}.yaml"
     if not flavor_f.is_file():
@@ -510,21 +509,18 @@ def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
     syncs = [img / "overlay/elxr", img / "overlay/simaai"]
     if overlay.is_dir() and any(overlay.iterdir()):
         syncs.append(overlay.resolve())
-    if trust or debs or aes_key:
-        tdir = ws / "build/trust"
-        shutil.rmtree(tdir, ignore_errors=True)
-        tdir.mkdir(parents=True)
-        syncs.append(tdir.resolve())
-    if trust:
-        (tdir / "etc/swupdate").mkdir(parents=True)
-        shutil.copy(trust, tdir / "etc/swupdate/swupdate.crt")
-        (tdir / "etc/swupdate.cfg").write_text(
-            'globals :\n{\n\tpublic-key-file = "/etc/swupdate/swupdate.crt";\n'
-            + ('\taes-key-file = "/etc/swupdate/aes.key";\n' if aes_key else "")
-            + f'\tno-downgrading = "{version}";\n}};\n')
-        (tdir / "usr/bin").mkdir(parents=True)
-        (tdir / "usr/bin/simaai-update").write_text(UPDATE_WRAPPER)
-        (tdir / "usr/bin/simaai-update").chmod(0o755)
+    tdir = ws / "build/trust"
+    shutil.rmtree(tdir, ignore_errors=True)
+    (tdir / "etc/swupdate").mkdir(parents=True)
+    syncs.append(tdir.resolve())
+    shutil.copy(trust, tdir / "etc/swupdate/swupdate.crt")
+    (tdir / "etc/swupdate.cfg").write_text(
+        'globals :\n{\n\tpublic-key-file = "/etc/swupdate/swupdate.crt";\n'
+        + ('\taes-key-file = "/etc/swupdate/aes.key";\n' if aes_key else "")
+        + f'\tno-downgrading = "{version}";\n}};\n')
+    (tdir / "usr/bin").mkdir(parents=True)
+    (tdir / "usr/bin/simaai-update").write_text(UPDATE_WRAPPER)
+    (tdir / "usr/bin/simaai-update").chmod(0o755)
     if aes_key:
         (tdir / "etc/swupdate/aes.key").touch(mode=0o600)
         (tdir / "etc/swupdate/aes.key").write_text(Path(aes_key).read_text())
@@ -557,12 +553,10 @@ def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
     vendor = str(cfg.get("vendor") or "")
     if re.search(r"[\x00-\x1f\x7f]", vendor):
         die("vendor must be a single line of text")
-    (ws / "build").mkdir(exist_ok=True)
-    (ws / "build/vendor").write_text(vendor)
     if not re.fullmatch(r"[a-z0-9_]+", cfg["target"]):
         die(f"target {cfg['target']!r} has unsupported characters")
     # Runs last: tags package origins, checks one boot chain, adds the vendor.
-    finish = f"cib _finish $1 {(ws / 'build').resolve()} {cfg['target']}"
+    finish = f"cib _finish $1 {(ws / 'build').resolve()}"
     items = ",".join(json.dumps(x) for x in
                      [*(f"sh {h.resolve()} $1" for h in hooks), finish])
     stages = sub1(
@@ -580,7 +574,7 @@ def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
 
     swu = cfg.get("swu") or {}
     (ws / "build/policy.json").write_text(json.dumps({
-        "base": base, "dev": version.endswith("-dev"),
+        "base": base, "dev": version.endswith("-dev"), "target": cfg["target"], "vendor": vendor,
         "own_sources": bool(cfg.get("sima_source") or cfg.get("sources"))}))
     script = "update_modalix.sh"
     if swu.get("script"):
@@ -610,7 +604,6 @@ def write_effective(ws, cfg, version, trust=None, debs=(), aes_key=None):
     target.write_text(flavor)
     (img / "cib-params.yaml").write_text(params)
     (img / "cib-stages.yaml").write_text(stages)
-    (ws / "build").mkdir(exist_ok=True)
     shutil.copy(target, ws / "build/effective.yaml")
     return target
 
@@ -626,19 +619,18 @@ def check_issued(cert, ca):
 
 def build_signing(ws, cfg, dev):
     """(key, cert, trust): the swu stage gets a throwaway key; cib sign signs."""
+    if not dev:
+        ca = ws / ((cfg.get("signing") or {}).get("ca") or "keys/ca.crt")
+        if not ca.is_file():
+            die(f"{ca} not found (cib keys init creates it); without it the "
+                "image would trust no key")
     d = ws / "build/dev-keys"
     shutil.rmtree(d, ignore_errors=True)
     gen_keys(d, cn="CIB dev")
-    key, cert = d / "swu-signing.key", d / "swu-signing.crt"
     if dev:
         print("cib: WARNING: --dev uses a throwaway key; do not ship this image",
               file=sys.stderr)
-        return key, cert, d / "ca.crt"
-    ca = ws / ((cfg.get("signing") or {}).get("ca") or "keys/ca.crt")
-    if not ca.is_file():
-        die(f"{ca} not found (cib keys init creates it); without it the "
-            "image would trust no key")
-    return key, cert, ca.resolve()
+    return d / "swu-signing.key", d / "swu-signing.crt", d / "ca.crt" if dev else ca.resolve()
 
 
 CRED_LINE = re.compile(r"(root|sima):\$[0-9a-z]+\$\S+")  # a crypt(3) hash, never a plain password
@@ -698,14 +690,14 @@ def cmd_build(a):
                 if log.is_file() else []
             die("\n".join([*why, f"rs build failed with exit code {r.returncode}; "
                              f"out/{stem}* removed"]))
-        err = boot0_mismatch(ws, out, stem)
-        if err:
+        try:
+            write_manifest(ws, out, cfg, version, stem)
+        except BaseException:
             discard(out, stem)
-            die(err)
+            raise
         if not a.dev:
             for swu in built(out, stem, r"\.swu"):
                 unsign(swu)
-        write_manifest(ws, out, cfg, version, stem)
         write_sums(out)
     finally:
         shutil.rmtree(ws / "build/dev-keys", ignore_errors=True)
@@ -770,37 +762,29 @@ def release_boot0_md5(spec, cfg):
             ("Debug::NoLocking", "1"))]
         run(["apt-get", *opt, "update"])
         run(["apt-get", *opt, "download", spec], cwd=d)
-        run(["dpkg-deb", "-e", next(d.glob(f"{spec.partition('=')[0]}_*.deb")), d / "ctl"])
-        for ln in (d / "ctl/md5sums").read_text().splitlines():
+        for ln in run(["dpkg-deb", "-I", next(d.glob(f"{spec.partition('=')[0]}_*.deb")), "md5sums"]).splitlines():
             md5, _, name = ln.partition("  ")
             if name == "boot/Release/boot0.be":
                 return md5
     die(f"{spec} md5sums has no boot/Release/boot0.be")
 
 
-def boot0_mismatch(ws, out, stem):
-    """Error text when the bundle's boot0.be is not the one in SiMa's release package."""
+def write_manifest(ws, out, cfg, version, stem):
+    """<image>.manifest.json: every package with its origin, and the tRoot source. Dies,
+    writing nothing, when boot0.be is not the one in SiMa's release package."""
     boots, pkgs_f = built(out, stem, r"-boot0\.be"), ws / "build/packages.json"
     if not pkgs_f.is_file() or len(boots) != 1:
         die("the build left no package list or boot0.be to check")
+    pkgs = json.loads(pkgs_f.read_text())
     # The secure flavor installs troot-modalix-secure, which carries a different boot0.be.
-    t = [p for p in json.loads(pkgs_f.read_text()) if p["name"].startswith("troot-")]
+    t = [p for p in pkgs if p["name"].startswith("troot-")]
     if len(t) > 1:
         die(f"the image holds more than one tRoot package: {', '.join(p['name'] for p in t)}")
     name = t[0]["name"] if t else "troot-modalix"
     want = release_boot0_md5(f"{name}={t[0]['version']}" if t else name, cfg)
     got = hashlib.md5(boots[0].read_bytes()).hexdigest()
     if got != want:
-        return f"md5 check failed for boot0.be: bundle {got}, SiMa release {name} {want}"
-
-
-def write_manifest(ws, out, cfg, version, stem):
-    """<image>.manifest.json: every package with its origin, and the tRoot source."""
-    pkgs_f, boots = ws / "build/packages.json", built(out, stem, r"-boot0\.be")
-    if not pkgs_f.is_file() or len(boots) != 1:
-        die("the build left no package list or boot0.be to describe")
-    pkgs = json.loads(pkgs_f.read_text())
-    t = [p for p in pkgs if p["name"].startswith("troot-")]
+        die(f"md5 check failed for boot0.be: bundle {got}, SiMa release {name} {want}")
     src = {"source": "package", "package": " ".join(
         [t[0]["name"], t[0]["version"], f"({t[0]['origin']})"]) if t else "unknown"}
     stem = boots[0].name[:-len("-boot0.be")]
@@ -846,33 +830,22 @@ def write_swu(names, src, out):
         die(f"cpio failed: {r.stderr.decode().strip()}")
 
 
-def resolve_signing(a):
-    cfg = read_yaml(Path("image.yaml")) if Path("image.yaml").is_file() else {}
-    s = cfg.get("signing") or {}
-    cert = a.cert or os.environ.get("SWU_SIGNING_CERT") or s.get("cert")
-    key = a.key or os.environ.get("SWU_SIGNING_KEY") or s.get("key")
-    pkcs11 = a.pkcs11 or (key if str(key).startswith("pkcs11:") else None)
-    if not cert or not (pkcs11 or key):
-        die("need --cert and --key (or --pkcs11), or --dev")
-    return cert, (None if pkcs11 else key), pkcs11
+def one_in_out(what, *globs):
+    found = next((f for g in globs if (f := sorted(Path("out").glob(g)))), [])
+    if len(found) != 1:
+        die(f"{what} (out/ holds {len(found)})")
+    return found[0]
 
 
-def resolve_ca():
-    cfg = read_yaml(Path("image.yaml")) if Path("image.yaml").is_file() else {}
-    return (cfg.get("signing") or {}).get("ca") or "keys/ca.crt"
+def ws_yaml():
+    f = Path("image.yaml")
+    return read_yaml(f) if f.is_file() else {}
 
 
 def cmd_sign(a):
-    swu = Path(a.swu) if a.swu else None
-    if swu is None:
-        # out/ keeps earlier builds: default to the image.yaml version's bundle
-        y = read_yaml(Path("image.yaml")) if Path("image.yaml").is_file() else {}
-        stem = f"elxr-{y.get('base', '*')}-{y.get('target', '*')}-{y['version']}-" if y.get("version") else ""
-        found = sorted(Path("out").glob(f"{stem}*.unsigned.swu")) or \
-            sorted(Path("out").glob(f"{stem}*.swu"))
-        if len(found) != 1:
-            die("name the .swu to sign (out/ holds %d)" % len(found))
-        swu = found[0]
+    y = ws_yaml()  # out/ keeps earlier builds: default to the image.yaml version's bundle
+    stem = f"elxr-{y.get('base', '*')}-{y.get('target', '*')}-{y['version']}-" if y.get("version") else ""
+    swu = Path(a.swu) if a.swu else one_in_out("name the .swu to sign", f"{stem}*.unsigned.swu", f"{stem}*.swu")
     if not swu.is_file():
         die(f"{swu} not found")
     with tempfile.TemporaryDirectory() as t:
@@ -884,9 +857,15 @@ def cmd_sign(a):
             print("cib: WARNING: --dev signs with a throwaway key; the board "
                   "will not trust it", file=sys.stderr)
         else:
-            cert, key, pkcs11 = resolve_signing(a)
-            ca = Path(resolve_ca())
-            if ca.is_file() or resolve_ca() != "keys/ca.crt":  # check_issued dies when a named CA is missing
+            s = ws_yaml().get("signing") or {}
+            cert = a.cert or os.environ.get("SWU_SIGNING_CERT") or s.get("cert")
+            key = a.key or os.environ.get("SWU_SIGNING_KEY") or s.get("key")
+            pkcs11 = a.pkcs11 or (key if str(key).startswith("pkcs11:") else None)
+            if not cert or not (pkcs11 or key):
+                die("need --cert and --key (or --pkcs11), or --dev")
+            key = None if pkcs11 else key
+            ca = Path(s.get("ca") or "keys/ca.crt")
+            if ca.is_file() or s.get("ca"):  # check_issued dies when a named CA is missing
                 check_issued(cert, ca)
             else:
                 print(f"cib: warning: {ca} not found; not checking that the "
@@ -900,9 +879,7 @@ def cmd_sign(a):
             desc = re.sub(r'(version\s*=\s*")([^"]*)(")',
                           lambda m: m[1] + m[2].removesuffix("-dev") + "-dev" + m[3], desc, count=1)
         if a.encrypt:
-            aes = a.aes_key
-            if not aes and Path("image.yaml").is_file():
-                aes = (read_yaml(Path("image.yaml")).get("encryption") or {}).get("key")
+            aes = a.aes_key or (ws_yaml().get("encryption") or {}).get("key")
             if not aes:
                 die("--encrypt needs --aes-key or encryption.key in image.yaml")
             desc = encrypt_payloads(d, names, desc, read_aes_key(aes))
@@ -915,9 +892,9 @@ def cmd_sign(a):
         run(cmd)
         out = Path(a.out) if a.out else \
             swu.with_name(swu.name.replace(".unsigned.swu", ".swu"))
-        write_swu([names[0], "sw-description.sig", *names[1:]], d,
-                  out.with_name(out.name + ".tmp"))
-        out.with_name(out.name + ".tmp").replace(out)
+        tmp = out.with_name(out.name + ".tmp")
+        write_swu([names[0], "sw-description.sig", *names[1:]], d, tmp)
+        tmp.replace(out)
     sums = out.parent / "SHA256SUMS"
     if sums.is_file():
         write_sums(out.parent)
@@ -1002,17 +979,16 @@ def cmd_verify(a):
             die(f"version {ver and ver[1]!r} is not numeric <release>.<build>")
         if not compat or not compat[1].strip():
             die("hardware-compatibility is missing or empty")
-        count = 0
-        for name, digest in artifacts(text):
+        arts = list(artifacts(text))
+        if not arts:
+            die("sw-description lists no artifacts")
+        for name, digest in arts:
             if not (d / name).is_file():
                 die(f"{name} is referenced but not in the bundle")
             if digest is None:
                 die(f"{name} has no sha256 in the signed description")
             if sha256(d / name) != digest:
                 die(f"{name} does not match its signed sha256")
-            count += 1
-        if not count:
-            die("sw-description lists no artifacts")
         if a.manifest:
             try:
                 m = json.loads(Path(a.manifest).read_text())
@@ -1023,7 +999,7 @@ def cmd_verify(a):
                 die(f"the manifest describes version {mver}, the bundle is {ver[1]}")
             if not (d / "boot0.be").is_file() or sha256(d / "boot0.be") != want:
                 die("boot0.be does not match the manifest")
-    print(f"cib: {a.swu} OK ({count} artifacts verified)")
+    print(f"cib: {a.swu} OK ({len(arts)} artifacts verified)")
 
 
 # ---- kernel FIT signature (securepalette) -----------------------------------
@@ -1034,8 +1010,8 @@ SHA256_DER = bytes.fromhex("3031300d060960864801650304020105000420")  # PKCS#1 D
 
 
 def fdt_parse(b):
-    """(nodes, tags, strings offset, total size) of a device tree blob: nodes is
-    {path: {property: bytes}}, tags [(tag, offset, next, name)] in the struct block."""
+    """(nodes, tags, struct offset, strings offset, total size) of a device tree blob:
+    nodes is {path: {property: bytes}}, tags [(tag, offset, next, name)] in the struct block."""
     magic, total, off_struct, off_strings, _, _, _, _, _, size_struct = struct.unpack(">10I", b[:40])
     if magic != 0xd00dfeed or total > len(b):
         raise ValueError("not a device tree")
@@ -1103,7 +1079,7 @@ def required_keys(*blobs):
         for m in re.finditer(re.escape(FDT_MAGIC), b):
             try:
                 nodes = fdt_parse(b[m.start():])[0]
-            except (ValueError, IndexError, struct.error, UnicodeDecodeError):
+            except (ValueError, IndexError, struct.error):
                 continue
             for path, props in nodes.items():
                 if path.startswith("/signature/") and text(props.get("required")) == "conf" \
@@ -1119,7 +1095,7 @@ def fit_check(fit, keys):
     signature covers the configuration and its images, and each image matches its hash."""
     try:
         nodes, tags, off_struct, off_strings, total = fdt_parse(fit)
-    except (ValueError, IndexError, struct.error, UnicodeDecodeError) as ex:
+    except (ValueError, IndexError, struct.error) as ex:
         die(f"the kernel fitImage is not a FIT: {ex}")
     conf = "/configurations/" + text(nodes.get("/configurations", {}).get("default"))
     if conf not in nodes:
@@ -1212,7 +1188,7 @@ def check_secure_boot(root, dev):
 
 # ---- build-time hook and cleanup ------------------------------------------
 
-ORIGINS = ("customer", "sima", "elxr", "debian")
+ORIGINS = {"customer": "localhost", "sima": "sima.ai", "elxr": "elxr.dev", "debian": "debian.org"}
 
 
 def installed(root):
@@ -1228,11 +1204,7 @@ def installed(root):
 
 def origin_of(listname):
     host = listname.split("_dists_")[0]
-    for origin, mark in (("customer", "localhost"), ("sima", "sima.ai"),
-                         ("elxr", "elxr.dev"), ("debian", "debian.org")):
-        if mark in host:
-            return origin
-    return host.split("_")[0]
+    return next((o for o, mark in ORIGINS.items() if mark in host), host.split("_")[0])
 
 
 def list_origins(root):
@@ -1262,55 +1234,52 @@ def list_origins(root):
 
 def cmd_finish(a):
     """Runs last in the image build: origins, one boot chain, vendor."""
+    policy = json.loads((Path(a.build) / "policy.json").read_text())
     pkgs, origins = installed(a.root), list_origins(a.root)
     out = []
     for name, ver in sorted(pkgs):
         got = origins.get((name, ver), set())
         out.append({"name": name, "version": ver, "origin": next(
             (o for o in ORIGINS if o in got), min(got, default="unknown"))})
-    for label, pat in boot_chain(a.target):
+    for label, pat in boot_chain(policy["target"]):
         got = [p["name"] for p in out if re.match(pat, p["name"])]
         if len(got) != 1:
             die(f"the image must hold one {label} package, found "
                 f"{len(got)}: {', '.join(got) or 'none'}")
     root = Path(a.root)
     for f in ("fip.bin", "u-boot.bin", "fitImage"):
-        if not (root / "boot" / f).is_file() or not (root / "boot" / f).stat().st_size:
+        if not (p := root / "boot" / f).is_file() or not p.stat().st_size:
             die(f"the image lacks /boot/{f}; the boot partition would be incomplete")
     check_fip_uboot(root)
     sets = sorted(d.name for d in (root / "lib").glob("linux-image-*") if d.is_dir())
     if len(sets) != 1:
         die(f"the boot partition would mix kernel/DTB sets: {', '.join(sets) or 'none'}")
-    policy = json.loads((Path(a.build) / "policy.json").read_text())
-    troot = [p for p in out if p["name"].startswith("troot-")]
-    if not policy["own_sources"] and any(p["origin"] != "sima" for p in troot):
-        die("the tRoot package must come from SiMa.ai's repo, not "
-            f"{', '.join(p['origin'] for p in troot)}")
+    if not policy["own_sources"]:
+        for pre, what in ROOTS:
+            pk = [p for p in out if p["name"].startswith(pre)]
+            if any(p["origin"] != "sima" for p in pk):
+                die(f"the {what} package must come from SiMa.ai's repo, not "
+                    f"{', '.join(p['origin'] for p in pk)}")
     if policy["base"] == "securepalette":
         check_secure_boot(root, policy["dev"])
-    atf = [p for p in out if p["name"].startswith("atf-")]
-    if not policy["own_sources"] and any(p["origin"] != "sima" for p in atf):
-        die("the ATF package must come from SiMa.ai's repo, not "
-            f"{', '.join(p['origin'] for p in atf)}")
     (Path(a.build) / "packages.json").write_text(json.dumps(out, indent=1) + "\n")
-    vendor = Path(a.build) / "vendor"
-    if vendor.is_file() and vendor.read_text():
-        with open(Path(a.root) / "etc/buildinfo", "a") as f:
-            f.write(f"VENDOR = {vendor.read_text()}\n")
+    if policy.get("vendor"):
+        with open(root / "etc/buildinfo", "a") as f:
+            f.write(f"VENDOR = {policy['vendor']}\n")
 
 
 def cmd_clean(a):
     cfg = load_config(Path.cwd())
     # any flavor: the interrupted build may not be the one image.yaml names now
     pat = re.compile(rf"^elxr-\w+-{re.escape(cfg['target'])}-.*\.img$")
-    todo = []
-    for ln in run(["losetup", "-l", "-n", "-O", "NAME,BACK-FILE"]).splitlines():
-        parts = ln.split(None, 1)
-        back = Path(parts[1].replace(" (deleted)", "")).name if len(parts) == 2 else ""
-        if pat.match(back):
-            todo.append(parts[0])
+    # /dev is the host's: match this workspace's images by inode, not path; deleted ones are orphans
+    own = {f"{os.major(s.st_dev)}:{os.minor(s.st_dev)} {s.st_ino}"
+           for s in (f.stat() for f in Path("out").glob("*.img") if pat.match(f.name))}
+    todo = [p[0] for ln in run(["losetup", "-l", "-n", "-O", "NAME,BACK-MAJ:MIN,BACK-INO,BACK-FILE"]).splitlines()
+            if len(p := ln.split(None, 3)) == 4 and (" ".join(p[1:3]) in own or (
+                p[3].endswith(" (deleted)") and pat.match(Path(p[3][:-10]).name)))]
     for dev in todo:
-        parts = sorted(str(p) for p in DEVDIR.glob(Path(dev).name + "p*"))
+        parts = sorted(str(p) for p in Path("/dev").glob(Path(dev).name + "p*"))
         # pvs without devices would list every volume group on the host
         r = subprocess.run(["pvs", "--noheadings", "-o", "vg_name", *parts],
                            capture_output=True, text=True) if parts else None
@@ -1345,12 +1314,7 @@ def components(path):
 
 
 def cmd_diff(a):
-    img = a.image
-    if img is None:
-        found = sorted(Path("out").glob("*.cdx.json"))
-        if len(found) != 1:
-            die("name the image SBOM with --image (out/ holds %d)" % len(found))
-        img = found[0]
+    img = a.image if a.image is not None else one_in_out("name the image SBOM with --image", "*.cdx.json")
     mine, ref = components(img), components(a.against)
     for name in sorted(mine.keys() | ref.keys()):
         if name not in ref:
@@ -1391,8 +1355,7 @@ def parser():
         s.add_argument("--cn", default="Customer")
         s.set_defaults(fn=fn)
 
-    s = sub.add_parser("verify-debs", help="check custom-debs/ signatures")
-    s.set_defaults(fn=cmd_verify_debs)
+    sub.add_parser("verify-debs", help="check custom-debs/ signatures").set_defaults(fn=cmd_verify_debs)
 
     s = sub.add_parser("sign-deb", help="sign a custom .deb (writes <deb>.sig)")
     s.add_argument("deb")
@@ -1430,7 +1393,7 @@ def parser():
     s.set_defaults(fn=cmd_clean)
 
     s = sub.add_parser("_finish")
-    for arg in ("root", "build", "target"):
+    for arg in ("root", "build"):
         s.add_argument(arg)
     s.set_defaults(fn=cmd_finish)
 

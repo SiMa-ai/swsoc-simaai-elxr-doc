@@ -49,9 +49,8 @@ ENV LANG=C.UTF-8
 
 # rucksack and its helpers come from eLxr; prefer its builds over Debian's.
 RUN printf 'Package: *\nPin: origin mirror.elxr.dev\nPin-Priority: 900\n' \
-        > /etc/apt/preferences.d/99pablo-repository
-
-RUN apt-get update && \
+        > /etc/apt/preferences.d/99pablo-repository && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         gnupg \
@@ -97,19 +96,12 @@ RUN apt-get update && \
         nginx && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Python packages come from dist/ only, never from PyPI: the pasha wheel and
-# debsbom (SBOM of the assembled rootfs, same version as SiMa.ai's own
-# builds) with its dependencies, pinned by hash in debsbom-requirements.txt.
-# dist/ is bind-mounted, not copied, so no wheel stays in an image layer.
-RUN --mount=type=bind,source=dist,target=/tmp/dist \
-    pip install --no-cache-dir --break-system-packages --no-index \
-        --find-links /tmp/dist --require-hashes -r /tmp/dist/debsbom-requirements.txt
-
-# SiMa.ai pasha: the rucksack modules the image configs name. --no-deps: its
-# requirements are the Debian python3-* packages above. The check fails the
-# build on a wheel that lacks any module the image stages use.
+# Python packages come only from the bind-mounted dist/: debsbom pinned by hash, then
+# pasha (--no-deps: its requirements are the python3-* above), checked for every module used.
 RUN --mount=type=bind,source=dist,target=/tmp/dist \
     test -f /tmp/dist/pasha-${RELEASE}-py3-none-any.whl || { echo "dist/pasha-${RELEASE}-py3-none-any.whl is missing: SiMa.ai packs and checks it in for each release" >&2; exit 1; } && \
+    pip install --no-cache-dir --break-system-packages --no-index \
+        --find-links /tmp/dist --require-hashes -r /tmp/dist/debsbom-requirements.txt && \
     pip install --no-cache-dir --no-deps --break-system-packages /tmp/dist/pasha-${RELEASE}-py3-none-any.whl && \
     python3 -c "from importlib.metadata import entry_points; \
 missing = {'bootstrap.mmdebstrap', 'image.compress', 'image.raw', 'installer.disk.lvm', \
@@ -117,21 +109,10 @@ missing = {'bootstrap.mmdebstrap', 'image.compress', 'image.raw', 'installer.dis
 'simaai.swupdate', 'utils.run_shell'} - set(entry_points(group='pasha.modules').names); \
 assert not missing, f'pasha wheel lacks modules: {sorted(missing)}'"
 
-# cib CLI (init, keys, build, sign, verify), installed next to pasha and
-# rucksack so the CLI always matches this image's modules and configs.
-# Source is cib/ in the build context (a Python package with its own
-# pyproject.toml); --no-deps for the same reason as pasha.
-COPY cib/ /tmp/cib/
-RUN pip install --no-cache-dir --no-deps --break-system-packages --no-index \
-        --no-build-isolation /tmp/cib && \
-    rm -rf /tmp/cib && \
-    cib --version
-
-# SiMa.ai public apt key, for the image configs' SiMa.ai mirror line.
-# Shipped in the build context and checked to be exactly one key with this
-# fingerprint rather than downloaded, so a build never trusts whatever a URL returns.
-COPY configs/images/files/simaai-public.asc /tmp/simaai-public.asc
-RUN export GNUPGHOME="$(mktemp -d)" && \
+# SiMa.ai apt key from the build context, checked to be exactly this one key; then the
+# date of its signed InRelease, the entrypoint's SOURCE_DATE_EPOCH.
+RUN --mount=type=bind,source=configs/images/files/simaai-public.asc,target=/tmp/simaai-public.asc \
+    export GNUPGHOME="$(mktemp -d)" && \
     keys="$(gpg --show-keys --with-colons /tmp/simaai-public.asc | \
            awk -F: '$1 == "pub" { n++ } $1 == "fpr" && !f { f = $10 } END { print n, f }')" && \
     if [ "$keys" != "1 $SIMAAI_KEY_FPR" ]; then \
@@ -139,14 +120,10 @@ RUN export GNUPGHOME="$(mktemp -d)" && \
         exit 1; \
     fi && \
     gpg --dearmor < /tmp/simaai-public.asc > /usr/share/keyrings/simaai-public.gpg && \
-    rm -r /tmp/simaai-public.asc "$GNUPGHOME"
-
-# Date of the release's signed package index, exported by the entrypoint as
-# SOURCE_DATE_EPOCH so file times in an image do not depend on the build day.
-RUN wget -q -O /tmp/InRelease "${SIMAAI_APT_URL}/dists/${CODENAME}/InRelease" && \
+    wget -q -O /tmp/InRelease "${SIMAAI_APT_URL}/dists/${CODENAME}/InRelease" && \
     gpgv --keyring /usr/share/keyrings/simaai-public.gpg /tmp/InRelease && \
     date -u -d "$(sed -n 's/^Date: //p' /tmp/InRelease)" +%s > /etc/cib-release-epoch && \
-    rm /tmp/InRelease
+    rm -r /tmp/InRelease "$GNUPGHOME"
 
 # Local apt repo layout, served by nginx at http://localhost/deb/custom.
 # No signing key is baked in: entrypoint.sh creates a fresh one on every container run, so
@@ -155,10 +132,6 @@ COPY files/distributions /var/www/html/deb/custom/conf/distributions
 RUN sed -i "s/@CODENAME@/${CODENAME}/" /var/www/html/deb/custom/conf/distributions
 COPY files/nginx.conf /etc/nginx/sites-enabled/default
 
-# The image configs and the files they need ship in the image; cib init copies
-# them into a workspace (CIB_CONFIGS or --configs picks another set).
-COPY configs/ /usr/share/cib/configs/
-COPY scripts/ /usr/share/cib/scripts/
 # elxr-config (manifests and overlay the configs link to) is public on GitLab:
 # fetched at a pinned commit and checked, minus the Orin boot images.
 ARG ELXR_CONFIG_COMMIT=0458b89f28d2ecd4c4d5ea5ec20985ce070b4dab
@@ -166,12 +139,22 @@ ARG ELXR_CONFIG_SHA256=4a4057a1472ccfa361fa17bddb7a5a5f387dafcd4658efd90cbaee846
 RUN wget -q -O /tmp/elxr-config.tar.gz \
         "https://gitlab.com/elxr/tools/elxr-config/-/archive/${ELXR_CONFIG_COMMIT}/elxr-config-${ELXR_CONFIG_COMMIT}.tar.gz" && \
     echo "${ELXR_CONFIG_SHA256}  /tmp/elxr-config.tar.gz" | sha256sum -c - && \
-    mkdir /usr/share/cib/elxr-config && \
+    mkdir -p /usr/share/cib/elxr-config && \
     tar -xzf /tmp/elxr-config.tar.gz -C /usr/share/cib/elxr-config --strip-components=1 --exclude='esp.img' && \
     rm /tmp/elxr-config.tar.gz
 
-COPY entrypoint.sh /usr/local/bin/cib-entrypoint
-RUN chmod 755 /usr/local/bin/cib-entrypoint
+# cib CLI, next to pasha so it matches this image's modules; --no-deps as for pasha.
+# rw: setuptools builds in-tree, and those writes are discarded with the mount.
+RUN --mount=type=bind,source=cib,target=/tmp/cib,rw \
+    pip install --no-cache-dir --no-deps --break-system-packages --no-index \
+        --no-build-isolation /tmp/cib && \
+    cib --version
+
+# The image configs and the files they need ship in the image; cib init copies
+# them into a workspace (CIB_CONFIGS or --configs picks another set).
+COPY configs/ /usr/share/cib/configs/
+COPY scripts/ /usr/share/cib/scripts/
+COPY --chmod=755 entrypoint.sh /usr/local/bin/cib-entrypoint
 
 # Apt sources for configs/images/image-stages.yaml: MIRROR_0 defaults to the
 # local repo there, MIRROR_1 is SiMa.ai's public repo. No SWU signing key is

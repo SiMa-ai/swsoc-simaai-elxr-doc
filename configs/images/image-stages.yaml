@@ -79,21 +79,14 @@ install:
   module: utils.run_shell
   options:
     commands:
-    - rm -Rvf ${params.cpio}.gz
-    - rm -Rvf ${params.cpio}
+    - rm -Rvf ${params.cpio}.gz ${params.cpio}
     - mkdir -p $(dirname ${params.cpio})
-    - rm -Rvf ${params.rootfs}
-    - mkdir ${params.rootfs}
+    - rm -Rf ${params.rootfs} && mkdir ${params.rootfs}
     - tar -xf ${params.source} --numeric-owner --exclude=./dev/* -C ${params.rootfs}
     - cd ${params.rootfs} && ln -s sbin/init init
-    # params.cpio is relative and every command runs in the invoking cwd
-    # (where gzip and simaai.bootloader expect the file); after the cd the
-    # archive must go to $OLDPWD or it lands inside the tree being archived.
-    - cd ${params.rootfs} && find . | sort | cpio --reproducible -o -H newc > "$OLDPWD/${params.cpio}"
-    - gzip -f -9 -n -c --rsyncable ${params.cpio} > ${params.cpio}.gz
-    # Only the .gz is consumed from here on (bootloader tftp publish); the
-    # raw archive is a gigabyte-plus of ephemeral storage per flavor.
-    - rm -f ${params.cpio}
+    # params.cpio is relative to the invoking cwd, hence $OLDPWD after the cd;
+    # bash for pipefail, so a cpio failure stays fatal.
+    - bash -o pipefail -c 'cd ${params.rootfs} && find . | sort | cpio --reproducible -o -H newc | gzip -9 -n --rsyncable > "$OLDPWD/${params.cpio}.gz"'
 
 # Software bill of materials, in the CycloneDX format vulnerability scanners
 # ingest. Generated for every flavor because it lives in the shared
