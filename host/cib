@@ -16,7 +16,7 @@ tty=()
 # Key files may live outside the workspace: mount each file alone read-only at
 # /keys/<variable> and point the container at it. PKCS#11 URIs pass through unchanged.
 keys=()
-for v in SWU_SIGNING_KEY SWU_SIGNING_CERT; do
+for v in SWU_SIGNING_KEY SWU_SIGNING_CERT CIB_CREDENTIALS; do
     f="${!v:-}"
     [ -n "$f" ] || continue
     case "$f" in
