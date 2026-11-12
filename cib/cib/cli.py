@@ -8,6 +8,7 @@ import lzma
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import struct
@@ -460,17 +461,19 @@ def check_description(text, members):
             die(f"swu.description installs {name}, which the bundle does not carry")
         if digest != f"@@{name}@@".lower():
             die(f"swu.description: sha256 of {name} must be @@{name}@@")
-    if "boot0.be" not in dict(arts):
-        die("swu.description must install boot0.be")
+    for need in ("boot0.be", "sbom.cdx.json"):
+        if need not in dict(arts):
+            die(f"swu.description must list {need}")
 
 
-def write_effective(ws, cfg, version, trust, debs, aes_key):
+def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
     """Write cib-* copies of the reference flavor, params and stages.
 
     trust is installed in the rootfs as /etc/swupdate/swupdate.crt
     with an /etc/swupdate.cfg that uses it and refuses older versions; debs
     (package, version) are pinned so apt leaves them in place; aes_key (a key
-    file) is installed for swupdate to decrypt encrypted bundles.
+    file) is installed for swupdate to decrypt encrypted bundles; supplier
+    names the SBOM's distro supplier.
     """
     img = ws / "configs/images"
     base = cfg["base"]
@@ -498,7 +501,8 @@ def write_effective(ws, cfg, version, trust, debs, aes_key):
             lambda m: f"{m[1]}: ${{concat:{m[2]},[{','.join(extra)}]}}",
             "package list")
 
-    stages = (img / "image-stages.yaml").read_text()
+    stages = sub1((img / "image-stages.yaml").read_text(), r"--distro-supplier SiMa\.ai$",
+                  lambda m: f"--distro-supplier={shlex.quote(supplier)}", "SBOM supplier")
     rel = str(cfg.get("overlay", "overlay") or "")
     overlay = ws / rel
     if ws.resolve() not in overlay.resolve().parents:
@@ -588,7 +592,7 @@ def write_effective(ws, cfg, version, trust, debs, aes_key):
     if swu.get("description"):
         d = member(swu["description"], "swu.description")
         check_description(d.read_text(), {"rootfs.ext4.gz", "boot.vfat.gz",
-                                          "boot0.be", "swu-os-marker", script})
+                                          "boot0.be", "swu-os-marker", "sbom.cdx.json", script})
         stages = sub1(stages, r"^( *description: ).*$",
                       lambda m: f"{m[1]}{json.dumps(str(d))}", "description")
     src = cfg.get("sources")
@@ -658,6 +662,9 @@ def check_credentials():
 
 
 def cmd_build(a):
+    supplier = a.supplier or "SiMa.ai"
+    if not supplier.strip() or len(supplier) > 256 or "${" in supplier or not supplier.isprintable():
+        die("--supplier must be one non-blank line of up to 256 characters, without '${'")
     ws = Path.cwd()
     cfg = load_config(ws)
     check_credentials()
@@ -674,7 +681,7 @@ def cmd_build(a):
     out = ws / "out"
     try:  # from here on the throwaway CA key and root-owned files are cleaned up
         key, cert, ca = build_signing(ws, cfg, a.dev)
-        config = write_effective(ws, cfg, version, ca, debs, aes and ws / aes)
+        config = write_effective(ws, cfg, version, ca, debs, aes and ws / aes, supplier)
         out.mkdir(exist_ok=True)
         env = dict(os.environ, CURRENT_DIR=str(ws), OUTPUT_DIR=str(out),
                    ROOTFS_SLOTS=slots, SWU_SIGNING_KEY=str(key), SWU_SIGNING_CERT=str(cert))
@@ -691,7 +698,7 @@ def cmd_build(a):
             die("\n".join([*why, f"rs build failed with exit code {r.returncode}; "
                              f"out/{stem}* removed"]))
         try:
-            write_manifest(ws, out, cfg, version, stem)
+            write_manifest(ws, out, cfg, version, stem, supplier)
         except BaseException:
             discard(out, stem)
             raise
@@ -769,7 +776,7 @@ def release_boot0_md5(spec, cfg):
     die(f"{spec} md5sums has no boot/Release/boot0.be")
 
 
-def write_manifest(ws, out, cfg, version, stem):
+def write_manifest(ws, out, cfg, version, stem, supplier):
     """<image>.manifest.json: every package with its origin, and the tRoot source. Dies,
     writing nothing, when boot0.be is not the one in SiMa's release package."""
     boots, pkgs_f = built(out, stem, r"-boot0\.be"), ws / "build/packages.json"
@@ -790,7 +797,7 @@ def write_manifest(ws, out, cfg, version, stem):
     stem = boots[0].name[:-len("-boot0.be")]
     (out / f"{stem}.manifest.json").write_text(json.dumps({
         "image": stem, "version": version, "release": cfg["release"],
-        "vendor": cfg.get("vendor"),
+        "vendor": cfg.get("vendor"), "supplier": supplier,
         "boot0": {**src, "sha256": sha256(boots[0])}, "packages": pkgs},
         indent=1) + "\n")
 
@@ -1365,6 +1372,7 @@ def parser():
     s = sub.add_parser("build", help="run the image build (rs build)")
     s.add_argument("--dev", action="store_true",
                    help="throwaway signing key, version gets -dev")
+    s.add_argument("--supplier", help="SBOM distro supplier (default SiMa.ai)")
     s.set_defaults(fn=cmd_build)
 
     s = sub.add_parser("sign", help="(re)sign a .swu with the customer key")

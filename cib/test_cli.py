@@ -1,5 +1,5 @@
 """assert checks for cib.cli; run: python3 cib/test_cli.py (host, no container)."""
-import argparse, contextlib, io, json, os, re, shutil, signal, struct, subprocess, sys, tempfile
+import argparse, contextlib, hashlib, io, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "cib"))
@@ -632,6 +632,95 @@ assert "PermitRootLogin yes" not in hook, "root keeps the default prohibit-passw
 assert hook.rstrip().endswith('rm -f "$1"/etc/ssh/ssh_host_*'), "host keys removed last, after every package is configured"
 assert 'systemctl enable --root="$1" simaai-ssh-hostkeys' in hook
 assert "Before=ssh.service" in unit and "ExecStart=/usr/bin/ssh-keygen -A" in unit and "WantedBy=ssh.service" in unit
+# --supplier: checked before anything else; empty means SiMa.ai
+with tempfile.TemporaryDirectory() as t:
+    here = os.getcwd(); os.chdir(t)
+    try:
+        for bad in ("  ", "a\nb", "a\tb", "a\x7f", "a\x85b", "a\u2028b", "a\u2029b", "x" * 257, "a${x}"):
+            assert "--supplier must be" in dies(c.cmd_build, argparse.Namespace(supplier=bad, dev=False)), repr(bad)
+        for ok in (None, "", "x" * 256, "Acme's $HOME `x` Corp"):
+            assert "image.yaml" in dies(c.cmd_build, argparse.Namespace(supplier=ok, dev=False)), repr(ok)
+    finally:
+        os.chdir(here)
+# the shipped sw-description lists the SBOM; a customer one must too
+M = {"rootfs.ext4.gz", "boot.vfat.gz", "boot0.be", "swu-os-marker", "sbom.cdx.json", "update_modalix.sh"}
+SWD = (ROOT / "configs/images/files/sw-description").read_text()
+c.check_description(SWD, M)
+assert ("sbom.cdx.json", "@@sbom.cdx.json@@") in list(c.artifacts(SWD))
+d = 'software = { version = "@@VERSION@@"; hardware-compatibility: [ @@HW_COMPAT@@ ];\n'
+b0 = '{ filename = "boot0.be"; sha256 = "@@boot0.be@@"; }\n'
+sb = '{ filename = "sbom.cdx.json"; sha256 = "@@sbom.cdx.json@@"; }\n'
+assert "must list sbom.cdx.json" in dies(c.check_description, d + b0 + "}", M)
+assert "must list boot0.be" in dies(c.check_description, d + sb + "}", M)
+assert "must be @@sbom.cdx.json@@" in dies(c.check_description, d + b0 + sb.replace("@@sbom", "@@x") + "}", M)
+assert "does not carry" in dies(c.check_description, d + b0 + sb + "}", M - {"sbom.cdx.json"})
+c.check_description(d + b0 + sb + "}", M)
+# stages: SBOM made after the unpack, copied into the tree before the cpio and ext4 are made,
+# and packed into the swu as sbom.cdx.json
+import yaml
+st = yaml.safe_load((ROOT / "configs/images/image-stages.yaml").read_text())["install"]
+names = [s["name"] for s in st]
+i = {k: next(n for n, s in enumerate(names) if s.startswith(k)) for k in (
+    "Unpack the rootfs", "Generate CycloneDX", "Generate CPIO", "Create rootfs file system", "Generate SWUpdate")}
+assert list(i.values()) == sorted(i.values()), i
+sbom_cmds = st[i["Generate CycloneDX"]]["options"]["commands"]
+assert sbom_cmds[1].startswith("install -D -m 0644 ${params.sbom} ${params.rootfs}/usr/share/doc/sbom/")
+assert {"src": "${params.sbom}", "name": "sbom.cdx.json"} in st[i["Generate SWUpdate"]]["options"]["files"]
+# write_effective(): the supplier reaches debsbom as one shell word, exactly as given
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t); img = ws / "configs/images"; (ws / "ca.crt").write_text("ca")
+    for o in ("elxr", "simaai"): (img / "overlay" / o).mkdir(parents=True)
+    for f in ("image-minimal-modalix.yaml", "image-params.yaml", "image-stages.yaml"):
+        shutil.copy(ROOT / "configs/images" / f, img)
+    cfg = {"base": "minimal", "target": "modalix", "version": "3.0.0.1", "release": "3.0.0"}
+    for sup in ("SiMa.ai", "Acme's $HOME `x` Corp", "Société Générale", "-Acme"):
+        c.write_effective(ws, cfg, "3.0.0.1", ws / "ca.crt", [], None, sup)
+        st2 = yaml.safe_load((ws / "configs/images/cib-stages.yaml").read_text())["install"]
+        cmd = next(s for s in st2 if s["name"].startswith("Generate CycloneDX"))["options"]["commands"][0]
+        assert [w for w in shlex.split(cmd) if w.startswith("--distro-supplier")] == ["--distro-supplier=" + sup], cmd
+        r = subprocess.run(["sh", "-c", "printf %s " + shlex.quote(sup)], capture_output=True, text=True)
+        assert r.stdout == sup, r
+# write_manifest(): records the supplier
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t); out = ws / "out"; out.mkdir(); (ws / "build").mkdir()
+    stem = "elxr-minimal-modalix-3.0.0.1-"
+    (out / (stem + "agate-arm64-boot0.be")).write_bytes(b"b0")
+    (ws / "build/packages.json").write_text(json.dumps([{"name": "troot-modalix", "version": "3.0.0", "origin": "sima"}]))
+    real = c.release_boot0_md5
+    c.release_boot0_md5 = lambda spec, cfg: hashlib.md5(b"b0").hexdigest()
+    try:
+        assert c.write_manifest(ws, out, {"release": "3.0.0"}, "3.0.0.1", stem, "Acme Corp") is None
+    finally:
+        c.release_boot0_md5 = real
+    m = json.loads((out / (stem + "agate-arm64.manifest.json")).read_text())
+    assert m["supplier"] == "Acme Corp" and m["boot0"]["package"] == "troot-modalix 3.0.0 (sima)", m
+# write_manifest(): no package list or boot0.be, several tRoot packages, no tRoot, the secure tRoot
+with tempfile.TemporaryDirectory() as t:
+    ws = Path(t); out = ws / "out"; out.mkdir(); (ws / "build").mkdir()
+    stem, man = "elxr-minimal-modalix-3.0.0.1-", out / "elxr-minimal-modalix-3.0.0.1-agate-arm64.manifest.json"
+    b0 = out / (stem + "agate-arm64-boot0.be"); pk = ws / "build/packages.json"
+    asked = []
+    real = c.release_boot0_md5
+    c.release_boot0_md5 = lambda spec, cfg: asked.append(spec) or hashlib.md5(b"b0").hexdigest()
+    wm = lambda: c.write_manifest(ws, out, {"release": "3.0.0"}, "3.0.0.1", stem, "S")
+    NONE = "cib: the build left no package list or boot0.be to check"
+    try:
+        assert dies(wm) == NONE, "no boot0.be"
+        b0.write_bytes(b"b0"); assert dies(wm) == NONE, "no packages.json"
+        pk.write_text("[]"); (out / (stem + "agate-arm64-boot0.bex")).write_bytes(b"x")
+        (out / (stem + "trixie-arm64-boot0.be")).write_bytes(b"b0"); assert dies(wm) == NONE, "two boot0.be"
+        (out / (stem + "trixie-arm64-boot0.be")).unlink()
+        T = lambda n, v="3": {"name": n, "version": v, "origin": "sima"}
+        pk.write_text(json.dumps([T("troot-modalix"), T("troot-modalix-secure"), T("bash")]))
+        assert dies(wm) == "cib: the image holds more than one tRoot package: troot-modalix, troot-modalix-secure"
+        assert not man.exists() and asked == [], "nothing written, nothing asked"
+        pk.write_text(json.dumps([T("bash")])); wm()
+        assert asked == ["troot-modalix"] and json.loads(man.read_text())["boot0"]["package"] == "unknown"
+        pk.write_text(json.dumps([T("troot-modalix-secure", "3.0.1"), T("bash")])); wm()
+        assert asked[-1] == "troot-modalix-secure=3.0.1"
+        assert json.loads(man.read_text())["boot0"]["package"] == "troot-modalix-secure 3.0.1 (sima)"
+    finally:
+        c.release_boot0_md5 = real
 # entrypoint: only "cib build" and a shell get the build set-up; other cib commands run at once
 ep = (ROOT / "entrypoint.sh").read_text()
 case = ep[ep.index('case "${1:-} ${2:-}" in'):ep.index("# --- arm64 emulation")]
@@ -822,6 +911,27 @@ with tempfile.TemporaryDirectory() as t:
                 except StopIteration:
                     pass
             assert sorted(p.name for p in out.iterdir()) == ["elxr-palette-modalix-3.0.0.1-agate-arm64.swu"], list(out.iterdir())
+        # success: manifest written, the throwaway signature dropped, SHA256SUMS over out/
+        def fake_ok(cmd, *a, **k):
+            if cmd[:2] != ["rs", "build"]:
+                return real_sp(cmd, *a, **k)
+            b = ws / "b"; b.mkdir(exist_ok=True)
+            for n in ("sw-description", "sw-description.sig", "boot0.be"): (b / n).write_text(n)
+            c.write_swu(["sw-description", "sw-description.sig", "boot0.be"], b, out / "elxr-minimal-modalix-3.0.0.1-agate-arm64.swu")
+            (out / "elxr-minimal-modalix-3.0.0.1-agate-arm64-boot0.be").write_text("b0")
+            return subprocess.CompletedProcess(cmd, 0)
+        c.subprocess.run = fake_ok
+        c.release_boot0_md5 = lambda spec, cfg: hashlib.md5(b"b0").hexdigest()
+        with contextlib.redirect_stdout(io.StringIO()) as o:
+            c.cmd_build(argparse.Namespace(supplier=None, dev=False))
+        S = "elxr-minimal-modalix-3.0.0.1-agate-arm64"
+        assert sorted(p.name for p in out.iterdir()) == sorted(["SHA256SUMS", S + "-boot0.be", S + ".manifest.json", S + ".unsigned.swu",
+                                                                "elxr-palette-modalix-3.0.0.1-agate-arm64.swu"]), list(out.iterdir())
+        with tempfile.TemporaryDirectory() as x:
+            assert c.read_swu(out / (S + ".unsigned.swu"), x) == ["sw-description", "boot0.be"]
+        m = json.loads((out / (S + ".manifest.json")).read_text())
+        assert m["version"] == "3.0.0.1" and m["supplier"] == "SiMa.ai" and m["boot0"]["sha256"] == c.sha256(out / (S + "-boot0.be"))
+        assert len((out / "SHA256SUMS").read_text().splitlines()) == 4 and o.getvalue().endswith(f"cib: artifacts in {out}\n")
     finally:
         c.subprocess.run = real_sp
         for k, v in saved.items(): setattr(c, k, v)

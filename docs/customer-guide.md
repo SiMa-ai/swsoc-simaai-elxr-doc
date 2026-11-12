@@ -56,7 +56,7 @@ nor `keys/ca.crt`).
 ## Encrypted bundles
 
 `cib sign --encrypt` encrypts the rootfs and boot payloads of a bundle with AES-256-CBC,
-each with its own IV recorded in the signed `sw-description`. `boot0.be` and the update
+each with its own IV recorded in the signed `sw-description`. `boot0.be`, the SBOM and the update
 script stay in the clear. To use it:
 
 1. `cib keys payload` writes `keys/payload.key` (the key and a default IV, in the

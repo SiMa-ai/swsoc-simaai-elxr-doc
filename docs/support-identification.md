@@ -13,6 +13,7 @@ What support can tell about an image from a board, and what needs the build outp
 | Is it a development (`--dev`) build? | `no-downgrading` in `/etc/swupdate.cfg` ends in `-dev`, and `/etc/swupdate/swupdate.crt` has the subject `CN=CIB dev SWU CA`. Such a board trusts a throwaway key: do not ship it |
 | Which slot is running and was there a rollback? | `simaai-trootctl get-active-slot` (per-slot validity) and `simaai-trootctl rollback-status` (the rollback latch); `simaai-ab-info` prints both |
 | Which downgrade floor does it enforce? | `no-downgrading` in `/etc/swupdate.cfg` (the image's own version) |
+| Which packages, with licenses and source packages? | The CycloneDX SBOM in `/usr/share/doc/sbom/` (the same file as the build's `.cdx.json` and the bundle's `sbom.cdx.json`) |
 | Which packages, and which did the customer supply? | `dpkg -l`; the pins in `99cib-custom`, when it exists, name the customer's packages and versions |
 
 A SiMa.ai release image has a three-field version and no `VENDOR` line.
@@ -21,7 +22,7 @@ A SiMa.ai release image has a three-field version and no `VENDOR` line.
 
 `<image>.manifest.json`, written next to the image by `cib build`, holds:
 
-- `image`, `version`, `release` and `vendor`;
+- `image`, `version`, `release`, `vendor` and the SBOM `supplier`;
 - every installed package with its version and origin: `customer` (from `custom-debs/`),
   `sima`, `elxr`, `debian`, or the mirror's host name for a custom `sources` mirror;
 - `boot0`: the tRoot source (the `troot-*` package, its version and origin) and the

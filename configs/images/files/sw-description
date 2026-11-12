@@ -39,6 +39,8 @@
  *    activation.
  *  - swu-os-marker: a zero-logic rawfile whose presence tells the script
  *    the OS parts were staged (firmware-only bundles omit it).
+ *  - sbom.cdx.json: the image's SBOM, signed with the rest; only the sbom set,
+ *    which no install selects, lists it. The rootfs has a copy in /usr/share/doc/sbom.
  *
  * @@VERSION@@ and the @@<member>@@ hashes are stamped by the
  * simaai.swupdate pasha module; signed installations require every
@@ -146,6 +148,19 @@ software =
 					filename = "update_modalix.sh";
 					type = "shellscript";
 					sha256 = "@@update_modalix.sh@@";
+				}
+			);
+		};
+	};
+
+	sbom = {
+		cyclonedx = {
+			files: (
+				{
+					filename = "sbom.cdx.json";
+					path = "/tmp/swupdate-sbom.cdx.json";
+					type = "rawfile";
+					sha256 = "@@sbom.cdx.json@@";
 				}
 			);
 		};

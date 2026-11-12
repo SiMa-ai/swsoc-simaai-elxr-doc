@@ -75,18 +75,13 @@ install:
     - ${oc.env:MIRROR_0,"deb [signed-by=${oc.env:KEY_PATH, /usr/share/keyrings/custom-repo.gpg}] ${oc.env:REPO, http://localhost}/deb/${oc.env:BUILD_TYPE, custom} ${params.codename} non-free"}
     - ${oc.env:MIRROR_1,"deb [signed-by=/usr/share/keyrings/simaai-public.gpg] https://repo.sima.ai/elxr/deb/release ${params.codename} non-free"}
 
-- name: "Generate CPIO."
+- name: "Unpack the rootfs tree."
   module: utils.run_shell
   options:
     commands:
-    - rm -Rvf ${params.cpio}.gz ${params.cpio}
-    - mkdir -p $(dirname ${params.cpio})
     - rm -Rf ${params.rootfs} && mkdir ${params.rootfs}
     - tar -xf ${params.source} --numeric-owner --exclude=./dev/* -C ${params.rootfs}
     - cd ${params.rootfs} && ln -s sbin/init init
-    # params.cpio is relative to the invoking cwd, hence $OLDPWD after the cd;
-    # bash for pipefail, so a cpio failure stays fatal.
-    - bash -o pipefail -c 'cd ${params.rootfs} && find . | sort | cpio --reproducible -o -H newc | gzip -9 -n --rsyncable > "$OLDPWD/${params.cpio}.gz"'
 
 # Software bill of materials, in the CycloneDX format vulnerability scanners
 # ingest. Generated for every flavor because it lives in the shared
@@ -95,7 +90,7 @@ install:
 #
 # It reads the extracted tree rather than the image or the tarball, so it must
 # stay after the stage above that unpacks the tarball into ${params.rootfs};
-# nothing modifies the tree again (mke2fs -d below only reads it), so it needs
+# the SBOM itself is the only file added to the tree after it, so it needs
 # to be no earlier than this. debsbom parses var/lib/dpkg/status directly, so
 # no chroot and no qemu are involved, and the foreign architecture is passed
 # explicitly: 'auto' would otherwise resolve to the amd64 build host's.
@@ -118,6 +113,19 @@ install:
       --add-meta-data platform=${platform}
       --add-meta-data codename=${codename}
       --add-meta-data build=${oc.env:BUILD, 0}
+    # The board's copy; it lists packages only, so adding it does not change it.
+    - install -D -m 0644 ${params.sbom} ${params.rootfs}/usr/share/doc/sbom/$(basename ${params.sbom})
+
+# After the SBOM stage, so the netboot rootfs carries the SBOM too.
+- name: "Generate CPIO."
+  module: utils.run_shell
+  options:
+    commands:
+    - rm -Rvf ${params.cpio}.gz ${params.cpio}
+    - mkdir -p $(dirname ${params.cpio})
+    # params.cpio is relative to the invoking cwd, hence $OLDPWD after the cd;
+    # bash for pipefail, so a cpio failure stays fatal.
+    - bash -o pipefail -c 'cd ${params.rootfs} && find . | sort | cpio --reproducible -o -H newc | gzip -9 -n --rsyncable > "$OLDPWD/${params.cpio}.gz"'
 
 # Everything from here on writes the image through this device, so prove it
 # still backs this image before the first write.
@@ -291,6 +299,8 @@ install:
       name: boot.vfat.gz
     - src: ${params.boot0}
       name: boot0.be
+    - src: ${params.sbom}
+      name: sbom.cdx.json
     # Zero-logic marker: its presence in a collection tells the update
     # script the OS parts were staged (firmware-only bundles omit it).
     - ${oc.env:CURRENT_DIR}/configs/images/files/swu-os-marker

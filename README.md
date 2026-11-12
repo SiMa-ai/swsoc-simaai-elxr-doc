@@ -127,6 +127,9 @@ mounted alone, read-only.
    builds a throwaway-signed bundle that no board will trust (version gets `-dev`).
    A rebuild with the same `version` replaces, and a failed one removes, every
    `out/` file of that version, a signed `.swu` included; bump `version` to keep them.
+   `cib build --supplier 'Acme Corp'` names the supplier in the SBOM (`.cdx.json`) and the
+   manifest; the default is `SiMa.ai`. The SBOM is also in the bundle as `sbom.cdx.json`,
+   covered by its signature, and on the board in `/usr/share/doc/sbom/`.
    The `palette` and `securepalette` flavors also write `simaai-image-palette.manifest`,
    `simaai-image-palette.licenses` and `du.txt` into `out/`; a failed build leaves those.
 
@@ -170,7 +173,7 @@ mounted alone, read-only.
 | `debs.key` | Public key that `custom-debs/*.deb` signatures must come from. |
 | `encryption.key` | Payload key file from `cib keys payload`. The build installs it as `/etc/swupdate/aes.key` (mode 600); `cib sign --encrypt` encrypts with it. |
 | `vendor` | One line written to `/etc/buildinfo` as `VENDOR = ...`. |
-| `swu.description`, `swu.script` | Your own `sw-description` and update script. The description must contain `@@VERSION@@`, `@@HW_COMPAT@@`, `@@<member>@@` for every hash, and install `boot0.be`. |
+| `swu.description`, `swu.script` | Your own `sw-description` and update script. The description must contain `@@VERSION@@`, `@@HW_COMPAT@@`, `@@<member>@@` for every hash, and list `boot0.be` and `sbom.cdx.json`. |
 | `sources` | List of apt lines replacing the Debian and eLxr ones (for a mirror). |
 | `sima_source` | One apt line replacing the SiMa.ai repository line. Keep `signed-by=/usr/share/keyrings/simaai-public.gpg`: it is the only keyring the image carries for it. Apt pins still match `repo.sima.ai`. |
 
@@ -197,7 +200,7 @@ mounted alone, read-only.
   bundle using that config.
 - `<image>.manifest.json` lists every installed package with its origin
   (`customer`, `sima`, `elxr`, `debian`, or the mirror host), the version, and
-  the `boot0.be` source and sha256.
+  the `boot0.be` source and sha256, and the SBOM `supplier`.
 - The apt lists come from `sources`, `sima_source` and the SiMa.ai release repo;
   the build-only local repo on `localhost` is removed from the shipped image.
 
