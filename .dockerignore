@@ -1,0 +1,11 @@
+*
+!entrypoint.sh
+!files/
+!dist/*.whl
+!dist/*.txt
+!cib/
+!configs/
+!scripts/
+cib/build/
+cib/*.egg-info/
+**/__pycache__/

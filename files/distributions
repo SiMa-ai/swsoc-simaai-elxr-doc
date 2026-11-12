@@ -1,0 +1,8 @@
+Codename: @CODENAME@
+Suite: unstable
+Architectures: source arm64
+Components: non-free
+SignWith: default
+Origin: CIB local
+Label: CIB local
+Description: Customer packages for the SiMa.ai Customer Image Builder

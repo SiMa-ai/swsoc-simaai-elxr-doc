@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Copyright (c) 2026 SiMa.ai Technologies, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Host shim: runs the cib CLI inside the CIB container with the current
+# directory as the workspace. Needs --privileged and the host /dev for loop
+# devices and LVM.
+set -euo pipefail
+
+IMAGE="${CIB_IMAGE:-sima-image-builder:${SIMA_RELEASE:-3.0.0}}"
+tty=()
+[ -t 0 ] && [ -t 1 ] && tty=(-t)
+
+# Key files may live outside the workspace: mount each file alone read-only at
+# /keys/<variable> and point the container at it. PKCS#11 URIs pass through unchanged.
+keys=()
+for v in SWU_SIGNING_KEY SWU_SIGNING_CERT; do
+    f="${!v:-}"
+    [ -n "$f" ] || continue
+    case "$f" in
+        pkcs11:*) keys+=(-e "$v=$f") ;;
+        *) [ -f "$f" ] || { echo "cib: $v: $f is not a file" >&2; exit 1; }
+           keys+=(-v "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")":"/keys/$v":ro
+                  -e "$v=/keys/$v") ;;
+    esac
+done
+
+# The reference configs (CIB_CONFIGS=<dir>/configs) may live outside the
+# workspace: mount their repo read-only and point the container at the mount.
+cfg=()
+if [ -n "${CIB_CONFIGS:-}" ]; then
+    d="$(cd "$CIB_CONFIGS" && pwd)"
+    cfg=(-v "$(dirname "$d")":/cib-src:ro -e "CIB_CONFIGS=/cib-src/$(basename "$d")")
+fi
+
+exec docker run --rm -i --init ${tty[@]+"${tty[@]}"} --privileged -v /dev:/dev \
+    -v "$PWD":/workspace -e CIB_UID="$(id -u)" -e CIB_GID="$(id -g)" \
+    ${keys[@]+"${keys[@]}"} ${cfg[@]+"${cfg[@]}"} "$IMAGE" cib "$@"

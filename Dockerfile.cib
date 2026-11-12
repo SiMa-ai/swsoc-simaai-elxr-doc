@@ -1,0 +1,179 @@
+# Copyright (c) 2026 SiMa.ai Technologies, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# SiMa.ai Customer Image Builder (CIB) container.
+#
+# Assembles Modalix eLxr images (rootfs, disk image, signed .swu) from
+# SiMa.ai's public apt repository plus the customer's own .debs (kernel,
+# U-Boot, extra packages). It builds no packages and needs nothing from
+# SiMa.ai beyond that repository: no package sources or cross toolchains are included
+# (eLxr's python3-rucksack does pull in a native build-essential).
+#
+# Build context is this directory. dist/ holds the SiMa.ai pasha wheel
+# (pasha-<release>-py3-none-any.whl, the rucksack image-build modules),
+# packed and checked in by SiMa.ai for each release, before
+#
+#   docker build -f Dockerfile.cib -t sima-image-builder:<release> .
+#
+# The container needs
+# --privileged for loop devices and LVM, and the
+# host's /dev: a container's /dev is a snapshot taken at start, so the
+# partition nodes "losetup --partscan" creates later (/dev/loopNpM) would
+# never appear in it. host/cib wraps this for every cib command:
+#
+#   docker run --rm -it --privileged -v /dev:/dev -v "$PWD":/workspace \
+#       -e CIB_UID=$(id -u) -e CIB_GID=$(id -g) \
+#       sima-image-builder:<release> cib build
+#
+# .debs in /workspace/custom-debs are served to the build from a signed
+# local repo that outranks SiMa.ai's packages (see entrypoint.sh).
+
+# The base is pinned by digest; the apt packages below float with the eLxr
+# mirror. Bump the digest deliberately (docker pull elxrlinux/elxr).
+ARG BASE_IMAGE=elxrlinux/elxr@sha256:922b153fccfe20337d71586dc9a6823cbe4cf0769ecec431279c662029814058
+FROM ${BASE_IMAGE}
+
+# eLxr release codename the image configs build for, and SiMa.ai's public
+# apt suite holding that release's packages.
+ARG CODENAME=agate
+# CIB / eLxr release this image builds; cib refuses an image.yaml for another.
+ARG RELEASE=3.0.0
+ARG SIMAAI_APT_URL=https://repo.sima.ai/elxr/deb/release
+# Fingerprint of simaai-public.asc, the key SiMa.ai's public repo is
+# signed with. The build refuses a key file that does not match it.
+ARG SIMAAI_KEY_FPR=1E527426828B89232E080FD44F87A7B80CFC8F4B
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# rucksack and its helpers come from eLxr; prefer its builds over Debian's.
+RUN printf 'Package: *\nPin: origin mirror.elxr.dev\nPin-Priority: 900\n' \
+        > /etc/apt/preferences.d/99pablo-repository
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gnupg \
+        wget \
+        python3-pip \
+# Build backend for the cib package below; pip gets no index to fetch one.
+        python3-setuptools \
+# Image assembly: rucksack runs the stages, pasha (below) provides the
+# modules. pasha's own Python dependencies come from Debian so the pip
+# install of the wheel can skip PyPI.
+        python3-rucksack \
+        python3-stevedore \
+        python3-yaml \
+        python3-rich \
+# Rootfs bootstrap: mmdebstrap runs arm64 maintainer scripts under
+# qemu-user-static.
+        mmdebstrap \
+        arch-test \
+        qemu-user-static \
+        binfmt-support \
+# "boot A/B + LVM" disk layout and its file systems.
+        udev \
+        kmod \
+        parted \
+        fdisk \
+        lvm2 \
+        dosfstools \
+        mtools \
+        e2fsprogs \
+        cpio \
+        gzip \
+        xz-utils \
+        zstd \
+# Boot partition (FIT/boot.scr/env) and .swu signing.
+        u-boot-tools \
+        device-tree-compiler \
+        openssl \
+# PKCS#11 (HSM/YubiKey) signing: cib sign --pkcs11 uses the engine.
+        libengine-pkcs11-openssl \
+        opensc \
+# Local apt repo for the customer's .debs.
+        reprepro \
+        nginx && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Python packages come from dist/ only, never from PyPI: the pasha wheel and
+# debsbom (SBOM of the assembled rootfs, same version as SiMa.ai's own
+# builds) with its dependencies, pinned by hash in debsbom-requirements.txt.
+# dist/ is bind-mounted, not copied, so no wheel stays in an image layer.
+RUN --mount=type=bind,source=dist,target=/tmp/dist \
+    pip install --no-cache-dir --break-system-packages --no-index \
+        --find-links /tmp/dist --require-hashes -r /tmp/dist/debsbom-requirements.txt
+
+# SiMa.ai pasha: the rucksack modules the image configs name. --no-deps: its
+# requirements are the Debian python3-* packages above. The check fails the
+# build on a wheel that lacks any module the image stages use.
+RUN --mount=type=bind,source=dist,target=/tmp/dist \
+    test -f /tmp/dist/pasha-${RELEASE}-py3-none-any.whl || { echo "dist/pasha-${RELEASE}-py3-none-any.whl is missing: SiMa.ai packs and checks it in for each release" >&2; exit 1; } && \
+    pip install --no-cache-dir --no-deps --break-system-packages /tmp/dist/pasha-${RELEASE}-py3-none-any.whl && \
+    python3 -c "from importlib.metadata import entry_points; \
+missing = {'bootstrap.mmdebstrap', 'image.compress', 'image.raw', 'installer.disk.lvm', \
+'installer.disk.lvm.teardown', 'installer.disk.parted', 'simaai.bootloader', \
+'simaai.swupdate', 'utils.run_shell'} - set(entry_points(group='pasha.modules').names); \
+assert not missing, f'pasha wheel lacks modules: {sorted(missing)}'"
+
+# cib CLI (init, keys, build, sign, verify), installed next to pasha and
+# rucksack so the CLI always matches this image's modules and configs.
+# Source is cib/ in the build context (a Python package with its own
+# pyproject.toml); --no-deps for the same reason as pasha.
+COPY cib/ /tmp/cib/
+RUN pip install --no-cache-dir --no-deps --break-system-packages --no-index \
+        --no-build-isolation /tmp/cib && \
+    rm -rf /tmp/cib && \
+    cib --version
+
+# SiMa.ai public apt key, for the image configs' SiMa.ai mirror line.
+# Shipped in the build context and checked to be exactly one key with this
+# fingerprint rather than downloaded, so a build never trusts whatever a URL returns.
+COPY configs/images/files/simaai-public.asc /tmp/simaai-public.asc
+RUN export GNUPGHOME="$(mktemp -d)" && \
+    keys="$(gpg --show-keys --with-colons /tmp/simaai-public.asc | \
+           awk -F: '$1 == "pub" { n++ } $1 == "fpr" && !f { f = $10 } END { print n, f }')" && \
+    if [ "$keys" != "1 $SIMAAI_KEY_FPR" ]; then \
+        echo "simaai-public.asc: keys and fingerprint '$keys', expected '1 $SIMAAI_KEY_FPR'" >&2; \
+        exit 1; \
+    fi && \
+    gpg --dearmor < /tmp/simaai-public.asc > /usr/share/keyrings/simaai-public.gpg && \
+    rm -r /tmp/simaai-public.asc "$GNUPGHOME"
+
+# Local apt repo layout, served by nginx at http://localhost/deb/custom.
+# No signing key is baked in: entrypoint.sh creates a fresh one on every container run, so
+# no two customers (and no published image layer) share it.
+COPY files/distributions /var/www/html/deb/custom/conf/distributions
+RUN sed -i "s/@CODENAME@/${CODENAME}/" /var/www/html/deb/custom/conf/distributions
+COPY files/nginx.conf /etc/nginx/sites-enabled/default
+
+# The image configs and the files they need ship in the image; cib init copies
+# them into a workspace (CIB_CONFIGS or --configs picks another set).
+COPY configs/ /usr/share/cib/configs/
+COPY scripts/ /usr/share/cib/scripts/
+# elxr-config (manifests and overlay the configs link to) is public on GitLab:
+# fetched at a pinned commit and checked, minus the Orin boot images.
+ARG ELXR_CONFIG_COMMIT=0458b89f28d2ecd4c4d5ea5ec20985ce070b4dab
+ARG ELXR_CONFIG_SHA256=4a4057a1472ccfa361fa17bddb7a5a5f387dafcd4658efd90cbaee846686631f
+RUN wget -q -O /tmp/elxr-config.tar.gz \
+        "https://gitlab.com/elxr/tools/elxr-config/-/archive/${ELXR_CONFIG_COMMIT}/elxr-config-${ELXR_CONFIG_COMMIT}.tar.gz" && \
+    echo "${ELXR_CONFIG_SHA256}  /tmp/elxr-config.tar.gz" | sha256sum -c - && \
+    mkdir /usr/share/cib/elxr-config && \
+    tar -xzf /tmp/elxr-config.tar.gz -C /usr/share/cib/elxr-config --strip-components=1 --exclude='esp.img' && \
+    rm /tmp/elxr-config.tar.gz
+
+COPY entrypoint.sh /usr/local/bin/cib-entrypoint
+RUN chmod 755 /usr/local/bin/cib-entrypoint
+
+# Apt sources for configs/images/image-stages.yaml: MIRROR_0 defaults to the
+# local repo there, MIRROR_1 is SiMa.ai's public repo. No SWU signing key is
+# set or shipped; cib build uses a throwaway one and cib sign the customer's.
+ENV CIB_CODENAME=${CODENAME} \
+    SIMA_RELEASE=${RELEASE} \
+    MIRROR_1="deb [signed-by=/usr/share/keyrings/simaai-public.gpg] ${SIMAAI_APT_URL} ${CODENAME} non-free"
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/cib-entrypoint"]
+CMD ["bash"]
