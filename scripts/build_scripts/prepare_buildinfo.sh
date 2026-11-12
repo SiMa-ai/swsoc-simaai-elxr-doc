@@ -8,7 +8,7 @@ platform=$2
 version=$3
 build=$4
 codename=$5
-branch=$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo cib)
+branch=$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo pib)
 
 cat > "$build_file" <<EOF
 -----------------------

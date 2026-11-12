@@ -1,10 +1,10 @@
-"""assert checks for cib.cli; run: python3 cib/test_cli.py (host, no container)."""
+"""assert checks for pib.cli; run: python3 pib/test_cli.py (host, no container)."""
 import argparse, contextlib, hashlib, io, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "cib"))
-import cib.cli as c
-for v in ("SIMA_RELEASE", "CIB_UID", "CIB_GID", "CIB_CREDENTIALS"): os.environ.pop(v, None)
+sys.path.insert(0, str(ROOT / "pib"))
+import pib.cli as c
+for v in ("SIMA_RELEASE", "PIB_UID", "PIB_GID", "PIB_CREDENTIALS"): os.environ.pop(v, None)
 
 def dies(fn, *a, **k):
     try:
@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory() as t:
     for body, msg in (("base: 1\n" + good + "version: 3.0.0.1\n", "base must be text"),
                       (G + "hooks: x\n", "hooks must be a list"), (G + "slots: [a]\n", "slots must be text or a number"),
                       (G + "troot: {boot0: b}\n", "unknown field troot")):
-        (ws / "image.yaml").write_text(body); assert dies(c.load_config, ws) == "cib: image.yaml: " + msg, body
+        (ws / "image.yaml").write_text(body); assert dies(c.load_config, ws) == "pib: image.yaml: " + msg, body
     for body, msg in (("base: [", "not valid YAML"), ("- a\n", "must hold a mapping"),
                       ("base: minimal\n" + good + 'version: "3.0.0.1\\n"\n', "must be 3.0.0.<build>"),
                       (G + "hooks: [1]\n", "hooks must be a list of script file names")):
@@ -116,13 +116,13 @@ with tempfile.TemporaryDirectory() as t:
 
 # cmd_verify --manifest error paths need a bundle; covered in the container run.
 
-# chown(): a file already owned by CIB_UID/GID is left alone, so its setuid bit survives
+# chown(): a file already owned by PIB_UID/GID is left alone, so its setuid bit survives
 with tempfile.TemporaryDirectory() as d:
     f = Path(d) / "helper"; f.write_text("x"); f.chmod(0o4755)
-    os.environ["CIB_UID"], os.environ["CIB_GID"] = str(os.getuid()), str(os.getgid())
+    os.environ["PIB_UID"], os.environ["PIB_GID"] = str(os.getuid()), str(os.getgid())
     c.chown(d)
     assert f.stat().st_mode & 0o4000, "setuid bit lost"
-    del os.environ["CIB_UID"], os.environ["CIB_GID"]
+    del os.environ["PIB_UID"], os.environ["PIB_GID"]
 
 # strip_comments / artifacts: comments ignored, // inside a string kept
 desc = ('software = { version = "3.0.0.1"; images = (\n'
@@ -222,9 +222,9 @@ with tempfile.TemporaryDirectory() as d:
             c.read_swu(t / "n3.swu", x); one = (Path(x) / "sw-description").read_text()
             assert re.search(r'filename = "rootfs.ext4.gz";\s*encrypted = true;\s*ivt = "[0-9a-f]{32}";', one), one
             assert c.sha256(Path(x) / "rootfs.ext4.gz") in one
-        # cib sign: a CA named in image.yaml must exist; with none named a missing keys/ca.crt only warns
+        # pib sign: a CA named in image.yaml must exist; with none named a missing keys/ca.crt only warns
         (t / "image.yaml").write_text("signing: {ca: keys/none.crt}\n")
-        assert dies(sign, t / "u.swu", t / "x.swu") == "cib: keys/none.crt not found"
+        assert dies(sign, t / "u.swu", t / "x.swu") == "pib: keys/none.crt not found"
         (t / "image.yaml").write_text("signing: {ca: keys/ca.crt}\n"); sign(t / "u.swu", t / "x.swu")
         (t / "image.yaml").unlink()
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -235,17 +235,17 @@ with tempfile.TemporaryDirectory() as d:
             sign(t / "u.swu", t / "x.swu")        # none named, none there: a warning, and it signs
         os.rename(t / "keys/ca.off", t / "keys/ca.crt")
         assert "keys/ca.crt not found; not checking" in err.getvalue(), err.getvalue()
-        # cib sign refusals: a --dev bundle without --dev, a leaf from another CA, no key or cert
+        # pib sign refusals: a --dev bundle without --dev, a leaf from another CA, no key or cert
         assert "was built with --dev" in dies(sign, t / "d1.swu", t / "x.swu")
         c.gen_keys(t / "k3", algo="ec", cn="Other")
         other = argparse.Namespace(swu=str(t / "u.swu"), out=str(t / "x.swu"), dev=False, key=str(t / "k3/swu-signing.key"),
                                    cert=str(t / "k3/swu-signing.crt"), pkcs11=None, encrypt=False, aes_key=None)
-        assert dies(c.cmd_sign, other) == f"cib: {t}/k3/swu-signing.crt is not issued by keys/ca.crt; the board would reject the bundle"
+        assert dies(c.cmd_sign, other) == f"pib: {t}/k3/swu-signing.crt is not issued by keys/ca.crt; the board would reject the bundle"
         for v in ("SWU_SIGNING_KEY", "SWU_SIGNING_CERT"): os.environ.pop(v, None)
         for key, cert in ((None, None), (str(t / "keys/swu-signing.key"), None), (None, str(t / "keys/swu-signing.crt"))):
             assert dies(c.cmd_sign, argparse.Namespace(**{**vars(other), "key": key, "cert": cert})) == \
-                "cib: need --cert and --key (or --pkcs11), or --dev", (key, cert)
-        # cib verify refusals
+                "pib: need --cert and --key (or --pkcs11), or --dev", (key, cert)
+        # pib verify refusals
         def bundle(desc, files, name, signed=True):
             b = t / "b"; shutil.rmtree(b, ignore_errors=True); b.mkdir()
             (b / "sw-description").write_text(desc)
@@ -278,7 +278,7 @@ with tempfile.TemporaryDirectory() as d:
             c.cmd_verify(argparse.Namespace(swu=str(good), ca=str(t / "keys/ca.crt"), manifest=str(t / "m.json")))
         with contextlib.redirect_stdout(io.StringIO()):
             verify_m(json.dumps({"version": "3.0.0.1", "boot0": {"sha256": S0}}))
-        for m, want in (("{", "is not a cib manifest"), ("[]", "is not a cib manifest"), ('{"version": "3.0.0.1"}', "is not a cib manifest"),
+        for m, want in (("{", "is not a pib manifest"), ("[]", "is not a pib manifest"), ('{"version": "3.0.0.1"}', "is not a pib manifest"),
                         (json.dumps({"version": "3.0.0.2", "boot0": {"sha256": S0}}), "describes version 3.0.0.2, the bundle is 3.0.0.1"),
                         (json.dumps({"version": "3.0.0.1", "boot0": {"sha256": "0" * 64}}), "boot0.be does not match the manifest")):
             assert want in dies(verify_m, m), m
@@ -381,7 +381,7 @@ if all(shutil.which(x) for x in ("mkimage", "dtc", "openssl")):
         sh("dtc", "-O", "dtb", "-o", "cov.dtb", "e.dts")
         sh("mkimage", "-f", "cov.its", "-k", "keys", "-K", "cov.dtb", "-r", "cov.itb")
         assert dies(c.fit_check, (t / "cov.itb").read_bytes(), c.required_keys((t / "cov.dtb").read_bytes())) == \
-            "cib: the kernel FIT signature does not cover /images/fdt-1, /images/fdt-1/hash-1"
+            "pib: the kernel FIT signature does not cover /images/fdt-1, /images/fdt-1/hash-1"
         assert "not a FIT" in dies(c.fit_check, b"junk" * 20, keys)
         def fdt(conf, hashes):   # unsigned: no keys, so only the configuration and image hashes are checked
             (t / "x.dts").write_text('/dts-v1/; / { images { kernel { data = [00]; %s }; };\n'
@@ -516,25 +516,25 @@ with tempfile.TemporaryDirectory() as t:
     assert (t / "swu-signing.key").read_bytes() != k0 and (t / "swu-signing.crt").read_bytes() != c0
     c.check_issued(t / "swu-signing.crt", t / "ca.crt")
     # no key copy outlives the run; a leftover from a SIGKILL is swept; signal handlers come back
-    (t / ".cib-renew-dead").mkdir(); (t / ".cib-renew-dead/old.key").write_text("old secret")
+    (t / ".pib-renew-dead").mkdir(); (t / ".pib-renew-dead/old.key").write_text("old secret")
     (t / "keep.me").write_text("x")
     before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)
     c.gen_leaf(t, "ecdsa-p384", "T")
-    assert not list(t.glob(".cib-renew-*")), "stale and own work dirs removed"
+    assert not list(t.glob(".pib-renew-*")), "stale and own work dirs removed"
     assert (t / "keep.me").read_text() == "x" and (t / "ca.key").is_file()
     assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before, "handlers restored"
     k0, c0 = (t / "swu-signing.key").read_bytes(), (t / "swu-signing.crt").read_bytes()
-    code = ("import os, signal, sys; sys.path.insert(0, %r); import cib.cli as c; from pathlib import Path\n"
+    code = ("import os, signal, sys; sys.path.insert(0, %r); import pib.cli as c; from pathlib import Path\n"
             "real = os.replace\n"
             "def hit(s, d):\n"
             "    os.kill(os.getpid(), signal.SIGTERM); real(s, d)\n"
             "os.replace = hit\n"
-            "c.gen_leaf(Path(%r), 'ecdsa-p384', 'T')\n") % (str(ROOT / "cib"), str(t))
+            "c.gen_leaf(Path(%r), 'ecdsa-p384', 'T')\n") % (str(ROOT / "pib"), str(t))
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 128 + signal.SIGTERM, (r.returncode, r.stderr)
-    assert not list(t.glob(".cib-renew-*")), "SIGTERM mid-swap leaves no key copy"
+    assert not list(t.glob(".pib-renew-*")), "SIGTERM mid-swap leaves no key copy"
     assert (t / "swu-signing.key").read_bytes() == k0 and (t / "swu-signing.crt").read_bytes() == c0, "old pair intact"
-assert "keys/.cib-renew-*/" in c.GITIGNORE
+assert "keys/.pib-renew-*/" in c.GITIGNORE
 # update_modalix.sh: the inactive boot partition is unmounted when postinst fails, and by postfailure
 src = (ROOT / "configs/images/files/update_modalix.sh").read_text()
 snip = src[src.index("\t\tbootmnt=$(mktemp -d)"):src.index("\t\tfatlabel ")]
@@ -575,56 +575,56 @@ for table, ok in (("0 8 linear 179:2 2048", True), ("0 8 linear 179:2 2048\n8 8 
     r = subprocess.run(["sh", "-c", 'set -e\nvg=v inactive=B\ndmsetup() { printf "%s" "$DM"; }\n' + dmsnip + 'echo "$dmoff $dmlen"'],
                        env={**os.environ, "DM": table}, capture_output=True, text=True)
     assert (r.returncode == 0) == ok and (r.stdout == "2048 8\n" if ok else "not one linear segment" in r.stderr), (table, r)
-# CIB_CREDENTIALS: optional, validated up front, mounted by host/cib, read by base.sh with chpasswd -e
+# PIB_CREDENTIALS: optional, validated up front, mounted by host/pib, read by base.sh with chpasswd -e
 H = "$6$salt$" + "a" * 20
 CREDS = tempfile.TemporaryDirectory()
 def cred(text, name="credentials"):
-    f = Path(CREDS.name) / name; f.write_text(text); os.environ["CIB_CREDENTIALS"] = str(f); return f
+    f = Path(CREDS.name) / name; f.write_text(text); os.environ["PIB_CREDENTIALS"] = str(f); return f
 import contextlib, io
 with contextlib.redirect_stderr(io.StringIO()) as e:
     assert c.check_credentials() is None
-assert e.getvalue().startswith("cib: no CIB_CREDENTIALS: root and sima are locked") and e.getvalue().count("\n") == 1, e.getvalue()
-os.environ["CIB_CREDENTIALS"] = "/nonexistent/credentials"; assert "not found" in dies(c.check_credentials)
+assert e.getvalue().startswith("pib: no PIB_CREDENTIALS: root and sima are locked") and e.getvalue().count("\n") == 1, e.getvalue()
+os.environ["PIB_CREDENTIALS"] = "/nonexistent/credentials"; assert "not found" in dies(c.check_credentials)
 LINE, ONE = ":{} must be root:<hash> or sima:<hash> with a $id$ crypt hash, not a password", " must hold exactly one root and one sima line"
 for bad, want in ((f"root:root\nsima:{H}\n", LINE.format(1)), (f"root:{H}\n", ONE), (f"sima:{H}\n", ONE),
                   (f"root:{H}\nroot:{H}\nsima:{H}\n", ONE), (f"root:{H}\nsima:{H}\nbob:{H}\n", LINE.format(3)),
                   (f"root:!\nsima:{H}\n", LINE.format(1)), (f"root:{H}\n\nsima:{H}\n", LINE.format(2)),
                   (f"root:{H} \nsima:{H}\n", LINE.format(1)), ("", ONE)):
-    f = cred(bad); assert dies(c.check_credentials) == f"cib: {f}{want}", (bad, dies(c.check_credentials))
+    f = cred(bad); assert dies(c.check_credentials) == f"pib: {f}{want}", (bad, dies(c.check_credentials))
 cred(f"root:{H}\nsima:{H}\n"); c.check_credentials()
 cred(f"sima:{H}\nroot:{H}", "a b"); assert "paths used in hooks" in dies(c.check_credentials), "space in path"
-os.environ.pop("CIB_CREDENTIALS", None)
-# host/cib mounts the file read-only and passes the container path, not the content
+os.environ.pop("PIB_CREDENTIALS", None)
+# host/pib mounts the file read-only and passes the container path, not the content
 with tempfile.TemporaryDirectory() as t:
     t = Path(t); (t / "bin").mkdir(); (t / "keys").mkdir()
     (t / "bin/docker").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n'); (t / "bin/docker").chmod(0o755)
     (t / "keys/cred.txt").write_text("secret\n")
-    r = subprocess.run([str(ROOT / "host/cib"), "build"], cwd=t,
-                       env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "CIB_CREDENTIALS": str(t / "keys/cred.txt")},
+    r = subprocess.run([str(ROOT / "host/pib"), "build"], cwd=t,
+                       env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "PIB_CREDENTIALS": str(t / "keys/cred.txt")},
                        capture_output=True, text=True)
     args = r.stdout.split("\n")
-    assert f"{t}/keys/cred.txt:/keys/CIB_CREDENTIALS:ro" in args and "CIB_CREDENTIALS=/keys/CIB_CREDENTIALS" in args, args
+    assert f"{t}/keys/cred.txt:/keys/PIB_CREDENTIALS:ro" in args and "PIB_CREDENTIALS=/keys/PIB_CREDENTIALS" in args, args
     assert "secret" not in r.stdout and not any(a.startswith(f"{t}/keys:") for a in args), "only the file is mounted"
     for env, tag in (({}, "sima-image-builder:3.0.0"), ({"SIMA_RELEASE": "3.1.0"}, "sima-image-builder:3.1.0"),
-                     ({"SIMA_RELEASE": "3.1.0", "CIB_IMAGE": "reg/x:7"}, "reg/x:7")):
-        e = {k: v for k, v in os.environ.items() if k not in ("SIMA_RELEASE", "CIB_IMAGE", "CIB_CREDENTIALS")}
-        r = subprocess.run([str(ROOT / "host/cib"), "verify"], cwd=t, capture_output=True, text=True,
+                     ({"SIMA_RELEASE": "3.1.0", "PIB_IMAGE": "reg/x:7"}, "reg/x:7")):
+        e = {k: v for k, v in os.environ.items() if k not in ("SIMA_RELEASE", "PIB_IMAGE", "PIB_CREDENTIALS")}
+        r = subprocess.run([str(ROOT / "host/pib"), "verify"], cwd=t, capture_output=True, text=True,
                            env={**e, **env, "PATH": f"{t}/bin:{os.environ['PATH']}"})
-        assert r.stdout.split("\n")[-4:-1] == [tag, "cib", "verify"], (env, r.stdout)
+        assert r.stdout.split("\n")[-4:-1] == [tag, "pib", "verify"], (env, r.stdout)
     for missing in (t / "keys/none", t / "keys"):
-        r = subprocess.run([str(ROOT / "host/cib"), "sign"], cwd=t, capture_output=True, text=True,
+        r = subprocess.run([str(ROOT / "host/pib"), "sign"], cwd=t, capture_output=True, text=True,
                            env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "SWU_SIGNING_KEY": str(missing)})
         assert r.returncode == 1 and r.stdout == "" and f"SWU_SIGNING_KEY: {missing} is not a file" in r.stderr, r
 hook = (ROOT / "configs/images/hooks/base.sh").read_text()
 assert all(" chpasswd" not in ln or "chpasswd -e" in ln for ln in hook.splitlines()), "no password in the hook"
-snip = hook[hook.index("if [ -n \"${CIB_CREDENTIALS"):hook.index("chroot \"$1\" usermod -a -G sima root")].replace('"$1"', "/r")
+snip = hook[hook.index("if [ -n \"${PIB_CREDENTIALS"):hook.index("chroot \"$1\" usermod -a -G sima root")].replace('"$1"', "/r")
 def hook_run(env):
     return subprocess.run(["sh", "-c", 'chroot() { echo "chroot $*"; cat; }\nset -e\n' + snip + 'echo reached'],
                           env={"PATH": os.environ["PATH"], **env}, stdin=subprocess.DEVNULL, capture_output=True, text=True)
 r = hook_run({})
 assert r.returncode == 0 and r.stdout == "reached\n", r
-f = cred(f"root:{H}\nsima:{H}\n"); os.environ.pop("CIB_CREDENTIALS")
-r = hook_run({"CIB_CREDENTIALS": str(f)})
+f = cred(f"root:{H}\nsima:{H}\n"); os.environ.pop("PIB_CREDENTIALS")
+r = hook_run({"PIB_CREDENTIALS": str(f)})
 assert r.returncode == 0 and r.stdout.split("\n")[0] == "chroot /r chpasswd -e" and f"root:{H}" in r.stdout, r
 # SSH: no root password login, no host keys in the image, each board makes its own on first boot
 unit = (ROOT / "configs/images/overlay/simaai/usr/lib/systemd/system/simaai-ssh-hostkeys.service").read_text()
@@ -675,7 +675,7 @@ with tempfile.TemporaryDirectory() as t:
     cfg = {"base": "minimal", "target": "modalix", "version": "3.0.0.1", "release": "3.0.0"}
     for sup in ("SiMa.ai", "Acme's $HOME `x` Corp", "Société Générale", "-Acme"):
         c.write_effective(ws, cfg, "3.0.0.1", ws / "ca.crt", [], None, sup)
-        st2 = yaml.safe_load((ws / "configs/images/cib-stages.yaml").read_text())["install"]
+        st2 = yaml.safe_load((ws / "configs/images/pib-stages.yaml").read_text())["install"]
         cmd = next(s for s in st2 if s["name"].startswith("Generate CycloneDX"))["options"]["commands"][0]
         assert [w for w in shlex.split(cmd) if w.startswith("--distro-supplier")] == ["--distro-supplier=" + sup], cmd
         r = subprocess.run(["sh", "-c", "printf %s " + shlex.quote(sup)], capture_output=True, text=True)
@@ -703,7 +703,7 @@ with tempfile.TemporaryDirectory() as t:
     real = c.release_boot0_md5
     c.release_boot0_md5 = lambda spec, cfg: asked.append(spec) or hashlib.md5(b"b0").hexdigest()
     wm = lambda: c.write_manifest(ws, out, {"release": "3.0.0"}, "3.0.0.1", stem, "S")
-    NONE = "cib: the build left no package list or boot0.be to check"
+    NONE = "pib: the build left no package list or boot0.be to check"
     try:
         assert dies(wm) == NONE, "no boot0.be"
         b0.write_bytes(b"b0"); assert dies(wm) == NONE, "no packages.json"
@@ -712,7 +712,7 @@ with tempfile.TemporaryDirectory() as t:
         (out / (stem + "trixie-arm64-boot0.be")).unlink()
         T = lambda n, v="3": {"name": n, "version": v, "origin": "sima"}
         pk.write_text(json.dumps([T("troot-modalix"), T("troot-modalix-secure"), T("bash")]))
-        assert dies(wm) == "cib: the image holds more than one tRoot package: troot-modalix, troot-modalix-secure"
+        assert dies(wm) == "pib: the image holds more than one tRoot package: troot-modalix, troot-modalix-secure"
         assert not man.exists() and asked == [], "nothing written, nothing asked"
         pk.write_text(json.dumps([T("bash")])); wm()
         assert asked == ["troot-modalix"] and json.loads(man.read_text())["boot0"]["package"] == "unknown"
@@ -721,14 +721,14 @@ with tempfile.TemporaryDirectory() as t:
         assert json.loads(man.read_text())["boot0"]["package"] == "troot-modalix-secure 3.0.1 (sima)"
     finally:
         c.release_boot0_md5 = real
-# entrypoint: only "cib build" and a shell get the build set-up; other cib commands run at once
+# entrypoint: only "pib build" and a shell get the build set-up; other pib commands run at once
 ep = (ROOT / "entrypoint.sh").read_text()
 case = ep[ep.index('case "${1:-} ${2:-}" in'):ep.index("# --- arm64 emulation")]
 with tempfile.TemporaryDirectory() as t:
-    (Path(t) / "cib").write_text('#!/bin/sh\necho "ran $*"\n'); (Path(t) / "cib").chmod(0o755)
-    for argv, want in ((["cib", "sign", "x"], "ran sign x\n"), (["cib", "verify"], "ran verify\n"),
-                       (["cib", "build", "--dev"], "setup\n"), (["cib", "build"], "setup\n"), (["bash"], "setup\n"),
-                       (["bash", "-c", "x"], "setup\n"), (["cib", "builder"], "ran builder\n")):
+    (Path(t) / "pib").write_text('#!/bin/sh\necho "ran $*"\n'); (Path(t) / "pib").chmod(0o755)
+    for argv, want in ((["pib", "sign", "x"], "ran sign x\n"), (["pib", "verify"], "ran verify\n"),
+                       (["pib", "build", "--dev"], "setup\n"), (["pib", "build"], "setup\n"), (["bash"], "setup\n"),
+                       (["bash", "-c", "x"], "setup\n"), (["pib", "builder"], "ran builder\n")):
         r = subprocess.run(["bash", "-c", case + "echo setup", "ep", *argv], capture_output=True, text=True,
                            env={"PATH": f"{t}:{os.environ['PATH']}"})
         assert r.stdout == want, (argv, r.stdout, r.stderr)
@@ -744,7 +744,7 @@ with tempfile.TemporaryDirectory() as d:
     ws = Path(d); (ws / c.DEBS).mkdir(); cfg = {"target": "modalix", "debs": {"key": "k"}}
     assert c.check_debs(ws, {"target": "modalix"}) == [], "no debs, no key needed"
     (ws / c.DEBS / "a.deb").write_text("x"); (ws / c.DEBS / "b.deb").write_text("x")
-    assert dies(c.check_debs, ws, {"target": "modalix"}) == "cib: custom .debs must be signed: set debs.key in image.yaml"
+    assert dies(c.check_debs, ws, {"target": "modalix"}) == "pib: custom .debs must be signed: set debs.key in image.yaml"
     CTRL = {"a.deb": "Package: linux-image-6.18-modalix\nVersion: 1\nArchitecture: arm64\n",
             "b.deb": "Package: linux-image-6.19-modalix\nVersion: 2\nArchitecture: all\n"}
     real = c.check_deb_signature, c.run
@@ -754,18 +754,18 @@ with tempfile.TemporaryDirectory() as d:
         assert "custom-debs/ holds more than one kernel package: linux-image-6.18-modalix, linux-image-6.19-modalix" \
             in dies(c.check_debs, ws, cfg)
         CTRL["b.deb"] = "Package: x\nVersion: 2\nArchitecture: amd64\n"
-        assert dies(c.check_debs, ws, cfg) == "cib: b.deb is for amd64, not arm64"
+        assert dies(c.check_debs, ws, cfg) == "pib: b.deb is for amd64, not arm64"
         CTRL["b.deb"] = "Package: x\nVersion: 2\nArchitecture: all\n"
         assert c.check_debs(ws, cfg) == [("linux-image-6.18-modalix", "1"), ("x", "2")]
     finally:
         c.check_deb_signature, c.run = real
 # check_repo: needs the container's codename and published repo, and every custom deb in it
 with tempfile.TemporaryDirectory() as d:
-    os.environ["CIB_REPO_DIR"] = d; os.environ.pop("CIB_CODENAME", None)
+    os.environ["PIB_REPO_DIR"] = d; os.environ.pop("PIB_CODENAME", None)
     try:
-        assert "CIB_CODENAME is not set" in dies(c.check_repo, [])
-        os.environ["CIB_CODENAME"] = "agate"
-        assert dies(c.check_repo, []) == f"cib: local repo {d}/dists/agate is not published; start via the entrypoint"
+        assert "PIB_CODENAME is not set" in dies(c.check_repo, [])
+        os.environ["PIB_CODENAME"] = "agate"
+        assert dies(c.check_repo, []) == f"pib: local repo {d}/dists/agate is not published; start via the entrypoint"
         dist = Path(d) / "dists/agate"; (dist / "non-free/binary-arm64").mkdir(parents=True); (dist / "Release").write_text("r")
         c.check_repo([])
         assert "x 2 is missing from the local repo" in dies(c.check_repo, [("x", "2")]), "empty index"
@@ -773,7 +773,7 @@ with tempfile.TemporaryDirectory() as d:
         c.check_repo([("x", "1"), ("y", "2")])
         assert "x 2 is missing" in dies(c.check_repo, [("x", "2")]), "other version"
     finally:
-        os.environ.pop("CIB_REPO_DIR"); os.environ.pop("CIB_CODENAME", None)
+        os.environ.pop("PIB_REPO_DIR"); os.environ.pop("PIB_CODENAME", None)
 # cmd_clean: this workspace's elxr-*-<target>-*.img by inode, deleted backing files too; --yes deactivates and detaches
 with tempfile.TemporaryDirectory() as d:
     calls = []
@@ -798,8 +798,8 @@ with tempfile.TemporaryDirectory() as d:
         Path.glob = lambda self, pat: iter([Path(f"/dev/{pat[:-1]}1")]) if str(self) == "/dev" else real_glob(self, pat)
         with contextlib.redirect_stdout(io.StringIO()) as o:
             c.cmd_clean(argparse.Namespace(yes=False))
-        assert o.getvalue() == ("cib: would deactivate vgA and detach /dev/loop7\ncib: would deactivate vgA and detach /dev/loop8\n"
-                                "cib: run 'cib clean --yes' to do this (stop running builds first)\n"), o.getvalue()
+        assert o.getvalue() == ("pib: would deactivate vgA and detach /dev/loop7\npib: would deactivate vgA and detach /dev/loop8\n"
+                                "pib: run 'pib clean --yes' to do this (stop running builds first)\n"), o.getvalue()
         assert [x for x in calls if x[0] != "losetup"] == [], "a dry run changes nothing"
         calls.clear()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -809,7 +809,7 @@ with tempfile.TemporaryDirectory() as d:
         LOOPS = f"/dev/loop9 {other} /workspace/out/elxr-minimal-other-3.0.0.1-agate-arm64.img\n"
         with contextlib.redirect_stdout(io.StringIO()) as o:
             c.cmd_clean(argparse.Namespace(yes=True))
-        assert o.getvalue() == "cib: nothing to clean\n"
+        assert o.getvalue() == "pib: nothing to clean\n"
     finally:
         Path.glob = real_glob; os.chdir(cwd)
         c.run, c.load_config, c.subprocess.run = saved
@@ -835,15 +835,15 @@ with tempfile.TemporaryDirectory() as d:
     c.check_issued(k / "swu-signing.crt", k / "ca.crt")
     for name in ("ca.crt", "swu-signing.key", "debs-signing.asc"):
         e = Path(d) / "e"; e.mkdir(exist_ok=True); (e / name).write_text("mine")
-        assert dies(c.cmd_keys_init, argparse.Namespace(out=str(e), algo="ec", cn="T")) == f"cib: {e}/{name} exists; refusing to overwrite keys"
+        assert dies(c.cmd_keys_init, argparse.Namespace(out=str(e), algo="ec", cn="T")) == f"pib: {e}/{name} exists; refusing to overwrite keys"
         assert (e / name).read_text() == "mine" and len(list(e.iterdir())) == 1; (e / name).unlink()
     (k / "ca.key").rename(Path(d) / "ca.key")
-    assert dies(c.cmd_keys_renew, argparse.Namespace(out=str(k), algo="ec", cn="T")) == f"cib: {k}/ca.key not found; a new signing leaf needs the CA"
+    assert dies(c.cmd_keys_renew, argparse.Namespace(out=str(k), algo="ec", cn="T")) == f"pib: {k}/ca.key not found; a new signing leaf needs the CA"
     (Path(d) / "ca.key").rename(k / "ca.key")
     real = c.gen_leaf
     try:
         c.gen_leaf = lambda *a: (_ for _ in ()).throw(OSError("disk full"))
-        assert dies(c.cmd_keys_renew, argparse.Namespace(out=str(k), algo="ec", cn="T")) == "cib: cannot write the new signing leaf: disk full"
+        assert dies(c.cmd_keys_renew, argparse.Namespace(out=str(k), algo="ec", cn="T")) == "pib: cannot write the new signing leaf: disk full"
     finally:
         c.gen_leaf = real
     old = (k / "swu-signing.crt").read_bytes()
@@ -863,7 +863,7 @@ def fake_run(cmd, cwd=None, **k):
     return ""
 real = c.run
 os.environ.pop("MIRROR_1", None)
-assert dies(c.release_boot0_md5, "troot-modalix", {}) == "cib: no SiMa release apt line (MIRROR_1) to check boot0.be against"
+assert dies(c.release_boot0_md5, "troot-modalix", {}) == "pib: no SiMa release apt line (MIRROR_1) to check boot0.be against"
 os.environ["MIRROR_1"] = "deb http://repo.sima.ai x non-free"
 try:
     c.run = fake_run
@@ -871,7 +871,7 @@ try:
     assert c.release_boot0_md5("troot-modalix=3.0.0", {}) == "bb"
     assert calls[1][-2:] == ["download", "troot-modalix=3.0.0"] and "-oDir::Etc::sourceparts=/dev/null" in calls[0], calls
     MD5SUMS = "aa  boot/other\n"
-    assert dies(c.release_boot0_md5, "troot-modalix", {}) == "cib: troot-modalix md5sums has no boot/Release/boot0.be"
+    assert dies(c.release_boot0_md5, "troot-modalix", {}) == "pib: troot-modalix md5sums has no boot/Release/boot0.be"
     os.environ.pop("MIRROR_1"); MD5SUMS = "bb  boot/Release/boot0.be\n"
     assert c.release_boot0_md5("troot-modalix", {"sima_source": "deb http://m.example/sima agate non-free"}) == "bb"
     assert lists[0] == "deb http://repo.sima.ai x non-free\n" and lists[-1] == "deb http://m.example/sima agate non-free\n", lists
@@ -885,7 +885,7 @@ with tempfile.TemporaryDirectory() as t:
     cfg = {"base": "minimal", "target": "modalix", "version": "3.0.0.1", "release": "3.0.0"}
     stubs = dict(load_config=lambda ws: cfg, check_credentials=lambda: None, check_debs=lambda ws, cfg: [],
                  check_repo=lambda debs: None, build_signing=lambda ws, cfg, dev: ("k", "c", "ca"),
-                 write_effective=lambda *a: ws / "configs/images/cib.yaml")
+                 write_effective=lambda *a: ws / "configs/images/pib.yaml")
     saved = {k: getattr(c, k) for k in (*stubs, "release_boot0_md5")}
     real_sp = c.subprocess.run
     def fake_rs(cmd, *a, **k):
@@ -931,7 +931,7 @@ with tempfile.TemporaryDirectory() as t:
             assert c.read_swu(out / (S + ".unsigned.swu"), x) == ["sw-description", "boot0.be"]
         m = json.loads((out / (S + ".manifest.json")).read_text())
         assert m["version"] == "3.0.0.1" and m["supplier"] == "SiMa.ai" and m["boot0"]["sha256"] == c.sha256(out / (S + "-boot0.be"))
-        assert len((out / "SHA256SUMS").read_text().splitlines()) == 4 and o.getvalue().endswith(f"cib: artifacts in {out}\n")
+        assert len((out / "SHA256SUMS").read_text().splitlines()) == 4 and o.getvalue().endswith(f"pib: artifacts in {out}\n")
     finally:
         c.subprocess.run = real_sp
         for k, v in saved.items(): setattr(c, k, v)
@@ -954,15 +954,15 @@ with tempfile.TemporaryDirectory() as d:
     assert lic("ISC License") == {"ISC"} and lic("") is None
     assert lic("License: MIT\nsome GPL v2 text") == {"MIT"}, "DEP-5 wins over the heuristic"
     assert xl.extract_licenses(str(Path(d, "missing"))) is None
-# a missing input file ends in one cib: line, not a traceback
+# a missing input file ends in one pib: line, not a traceback
 with tempfile.TemporaryDirectory() as d:
     for argv in (["verify", "--ca", f"{d}/ca.crt", f"{d}/no.swu"], ["diff", "--against", f"{d}/no.json", "--image", f"{d}/no.cdx.json"]):
         try:
             c.main(argv)
             raise AssertionError(argv)
         except SystemExit as e:
-            assert str(e.code).startswith("cib: ") and "No such file or directory" in str(e.code), e.code
-# cib sign with no SWU: the image.yaml version's bundle, not whatever else out/ still holds
+            assert str(e.code).startswith("pib: ") and "No such file or directory" in str(e.code), e.code
+# pib sign with no SWU: the image.yaml version's bundle, not whatever else out/ still holds
 import argparse, contextlib, io
 with tempfile.TemporaryDirectory() as t:
     here = os.getcwd(); os.chdir(t); (Path(t) / "out").mkdir()
@@ -984,8 +984,8 @@ with tempfile.TemporaryDirectory() as t:
         c.read_swu, c.gen_keys = pick, lambda *a, **k: None
         assert sign("3.0.0.2") == N.format("3.0.0.2", "unsigned.")
         assert sign("3.0.0.1") == N.format("3.0.0.1", "unsigned."), "not 3.0.0.10, not the signed one"
-        assert sign(None) == "cib: name the .swu to sign (out/ holds 3)", "no image.yaml: every unsigned bundle"
-        assert sign("3.0.0.3") == "cib: name the .swu to sign (out/ holds 0)"
+        assert sign(None) == "pib: name the .swu to sign (out/ holds 3)", "no image.yaml: every unsigned bundle"
+        assert sign("3.0.0.3") == "pib: name the .swu to sign (out/ holds 0)"
         Path(N.format("3.0.0.1", "unsigned.")).unlink()
         assert sign("3.0.0.1") == N.format("3.0.0.1", ""), "only the signed one left: re-sign it"
     finally:

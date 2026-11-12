@@ -3,7 +3,7 @@
 set -e
 systemctl disable --root="$1" kea-ctrl-agent kea-dhcp-ddns-server kea-dhcp4-server kea-dhcp6-server
 systemctl --root="$1" mask pulseaudio.socket
-# Build reports go next to the image (OUTPUT_DIR, set by cib build).
+# Build reports go next to the image (OUTPUT_DIR, set by pib build).
 out="${OUTPUT_DIR:-$CURRENT_DIR}"
 chroot "$1" dpkg-query -l > "${out}/simaai-image-palette.manifest"
 # Ship the same manifest inside the image so simaai-pdiff can diff the

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# SiMa.ai Customer Image Builder (CIB) container.
+# SiMa.ai Palette Image Builder (PIB) container.
 #
 # Assembles Modalix eLxr images (rootfs, disk image, signed .swu) from
 # SiMa.ai's public apt repository plus the customer's own .debs (kernel,
@@ -14,17 +14,17 @@
 # (pasha-<release>-py3-none-any.whl, the rucksack image-build modules),
 # packed and checked in by SiMa.ai for each release, before
 #
-#   docker build -f Dockerfile.cib -t sima-image-builder:<release> .
+#   docker build -f Dockerfile.pib -t sima-image-builder:<release> .
 #
 # The container needs
 # --privileged for loop devices and LVM, and the
 # host's /dev: a container's /dev is a snapshot taken at start, so the
 # partition nodes "losetup --partscan" creates later (/dev/loopNpM) would
-# never appear in it. host/cib wraps this for every cib command:
+# never appear in it. host/pib wraps this for every pib command:
 #
 #   docker run --rm -it --privileged -v /dev:/dev -v "$PWD":/workspace \
-#       -e CIB_UID=$(id -u) -e CIB_GID=$(id -g) \
-#       sima-image-builder:<release> cib build
+#       -e PIB_UID=$(id -u) -e PIB_GID=$(id -g) \
+#       sima-image-builder:<release> pib build
 #
 # .debs in /workspace/custom-debs are served to the build from a signed
 # local repo that outranks SiMa.ai's packages (see entrypoint.sh).
@@ -37,7 +37,7 @@ FROM ${BASE_IMAGE}
 # eLxr release codename the image configs build for, and SiMa.ai's public
 # apt suite holding that release's packages.
 ARG CODENAME=agate
-# CIB / eLxr release this image builds; cib refuses an image.yaml for another.
+# PIB / eLxr release this image builds; pib refuses an image.yaml for another.
 ARG RELEASE=3.0.0
 ARG SIMAAI_APT_URL=https://repo.sima.ai/elxr/deb/release
 # Fingerprint of simaai-public.asc, the key SiMa.ai's public repo is
@@ -56,7 +56,7 @@ RUN printf 'Package: *\nPin: origin mirror.elxr.dev\nPin-Priority: 900\n' \
         gnupg \
         wget \
         python3-pip \
-# Build backend for the cib package below; pip gets no index to fetch one.
+# Build backend for the pib package below; pip gets no index to fetch one.
         python3-setuptools \
 # Image assembly: rucksack runs the stages, pasha (below) provides the
 # modules. pasha's own Python dependencies come from Debian so the pip
@@ -88,7 +88,7 @@ RUN printf 'Package: *\nPin: origin mirror.elxr.dev\nPin-Priority: 900\n' \
         u-boot-tools \
         device-tree-compiler \
         openssl \
-# PKCS#11 (HSM/YubiKey) signing: cib sign --pkcs11 uses the engine.
+# PKCS#11 (HSM/YubiKey) signing: pib sign --pkcs11 uses the engine.
         libengine-pkcs11-openssl \
         opensc \
 # Local apt repo for the customer's .debs.
@@ -122,7 +122,7 @@ RUN --mount=type=bind,source=configs/images/files/simaai-public.asc,target=/tmp/
     gpg --dearmor < /tmp/simaai-public.asc > /usr/share/keyrings/simaai-public.gpg && \
     wget -q -O /tmp/InRelease "${SIMAAI_APT_URL}/dists/${CODENAME}/InRelease" && \
     gpgv --keyring /usr/share/keyrings/simaai-public.gpg /tmp/InRelease && \
-    date -u -d "$(sed -n 's/^Date: //p' /tmp/InRelease)" +%s > /etc/cib-release-epoch && \
+    date -u -d "$(sed -n 's/^Date: //p' /tmp/InRelease)" +%s > /etc/pib-release-epoch && \
     rm -r /tmp/InRelease "$GNUPGHOME"
 
 # Local apt repo layout, served by nginx at http://localhost/deb/custom.
@@ -139,31 +139,31 @@ ARG ELXR_CONFIG_SHA256=4a4057a1472ccfa361fa17bddb7a5a5f387dafcd4658efd90cbaee846
 RUN wget -q -O /tmp/elxr-config.tar.gz \
         "https://gitlab.com/elxr/tools/elxr-config/-/archive/${ELXR_CONFIG_COMMIT}/elxr-config-${ELXR_CONFIG_COMMIT}.tar.gz" && \
     echo "${ELXR_CONFIG_SHA256}  /tmp/elxr-config.tar.gz" | sha256sum -c - && \
-    mkdir -p /usr/share/cib/elxr-config && \
-    tar -xzf /tmp/elxr-config.tar.gz -C /usr/share/cib/elxr-config --strip-components=1 --exclude='esp.img' && \
+    mkdir -p /usr/share/pib/elxr-config && \
+    tar -xzf /tmp/elxr-config.tar.gz -C /usr/share/pib/elxr-config --strip-components=1 --exclude='esp.img' && \
     rm /tmp/elxr-config.tar.gz
 
-# cib CLI, next to pasha so it matches this image's modules; --no-deps as for pasha.
+# pib CLI, next to pasha so it matches this image's modules; --no-deps as for pasha.
 # rw: setuptools builds in-tree, and those writes are discarded with the mount.
-RUN --mount=type=bind,source=cib,target=/tmp/cib,rw \
+RUN --mount=type=bind,source=pib,target=/tmp/pib,rw \
     pip install --no-cache-dir --no-deps --break-system-packages --no-index \
-        --no-build-isolation /tmp/cib && \
-    cib --version
+        --no-build-isolation /tmp/pib && \
+    pib --version
 
-# The image configs and the files they need ship in the image; cib init copies
-# them into a workspace (CIB_CONFIGS or --configs picks another set).
-COPY configs/ /usr/share/cib/configs/
-COPY scripts/ /usr/share/cib/scripts/
-COPY --chmod=755 entrypoint.sh /usr/local/bin/cib-entrypoint
+# The image configs and the files they need ship in the image; pib init copies
+# them into a workspace (PIB_CONFIGS or --configs picks another set).
+COPY configs/ /usr/share/pib/configs/
+COPY scripts/ /usr/share/pib/scripts/
+COPY --chmod=755 entrypoint.sh /usr/local/bin/pib-entrypoint
 
 # Apt sources for configs/images/image-stages.yaml: MIRROR_0 defaults to the
 # local repo there, MIRROR_1 is SiMa.ai's public repo. No SWU signing key is
-# set or shipped; cib build uses a throwaway one and cib sign the customer's.
-ENV CIB_CODENAME=${CODENAME} \
+# set or shipped; pib build uses a throwaway one and pib sign the customer's.
+ENV PIB_CODENAME=${CODENAME} \
     SIMA_RELEASE=${RELEASE} \
     MIRROR_1="deb [signed-by=/usr/share/keyrings/simaai-public.gpg] ${SIMAAI_APT_URL} ${CODENAME} non-free"
 
 WORKDIR /workspace
 
-ENTRYPOINT ["/usr/local/bin/cib-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/pib-entrypoint"]
 CMD ["bash"]

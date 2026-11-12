@@ -1,7 +1,7 @@
 #!/bin/sh
 # Common rootfs customization. $1 = rootfs directory.
 # Parameters via environment: PLATFORM, VERSION, CODENAME, BUILD,
-# CIB_CREDENTIALS, CURRENT_DIR.
+# PIB_CREDENTIALS, CURRENT_DIR.
 # Consumed by the mmdebstrap customize hooks (image-params.yaml).
 set -e
 chroot "$1" groupadd sima
@@ -10,8 +10,8 @@ chroot "$1" groupadd -f i2c
 chroot "$1" useradd -m -s /bin/bash -g sima -G sudo,audio,video,tracing,i2c sima
 # root and sima passwords: crypt hashes, one user:hash line each, from outside the repo.
 # Without them both stay locked, as the base system and useradd leave them.
-if [ -n "${CIB_CREDENTIALS:-}" ]; then
-	chroot "$1" chpasswd -e < "$CIB_CREDENTIALS"
+if [ -n "${PIB_CREDENTIALS:-}" ]; then
+	chroot "$1" chpasswd -e < "$PIB_CREDENTIALS"
 fi
 chroot "$1" usermod -a -G sima root
 echo "${PLATFORM}" > "$1/etc/hostname"

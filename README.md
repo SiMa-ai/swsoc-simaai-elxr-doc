@@ -1,24 +1,24 @@
-# SiMa.ai Customer Image Builder (CIB)
+# SiMa.ai Palette Image Builder (PIB)
 
-CIB builds a customer's own eLxr image and update bundle (`.swu`) for SiMa.ai
+PIB builds a customer's own eLxr image and update bundle (`.swu`) for SiMa.ai
 Modalix boards. It runs in a container and wraps `rs build` (rucksack). The
 customer adds packages, an overlay and hooks, signs
 the bundle with their own key, and boards only accept bundles signed under the
 customer's CA.
 
-This repository holds the container build context and the `cib` command, next to the
+This repository holds the container build context and the `pib` command, next to the
 SiMa.ai SDK manual:
 
 | Path | What it is |
 |---|---|
-| `Dockerfile.cib`, `entrypoint.sh`, `files/` | The container (eLxr base, rucksack, a local signed apt repo for `custom-debs/`) |
+| `Dockerfile.pib`, `entrypoint.sh`, `files/` | The container (eLxr base, rucksack, a local signed apt repo for `custom-debs/`) |
 | `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release) |
-| `cib/` | The `cib` Python package and its `pyproject.toml` |
-| `host/cib` | Host shim: runs the container with the current directory as the workspace |
+| `pib/` | The `pib` Python package and its `pyproject.toml` |
+| `host/pib` | Host shim: runs the container with the current directory as the workspace |
 | `configs/images/` | Image configs for each flavor (`image-{minimal,palette,securepalette}-modalix.yaml`), with the stage list, params, hooks, overlay and SWU files they use |
 | `scripts/` | The two build helper scripts the stages call |
 | `UPSTREAM` | What the configs were taken from (the SiMa.ai 3.0.0 image configs, the eLxr config tool commit) and how they differ |
-| `sdk-manual.rst`, `images/`, `Dockerfile.modalix` | The SiMa.ai SDK manual, its figures, and the SDK container it describes (not part of CIB) |
+| `sdk-manual.rst`, `images/`, `Dockerfile.modalix` | The SiMa.ai SDK manual, its figures, and the SDK container it describes (not part of PIB) |
 
 The `minimal` and `palette` flavors have been built end to end; `securepalette` has not,
 and no fused (secure-boot) board has been tested. A build needs network access to the
@@ -29,7 +29,7 @@ be signed for shipping: a shippable `securepalette` needs kernel, U-Boot and ATF
 signed with a production key.
 
 The base image is pinned by digest and the debsbom wheels are checked against hashes;
-the pasha wheel in `dist/` and the `cib` package are installed without a hash check. The eLxr apt packages (rucksack, mmdebstrap, qemu) are whatever the eLxr
+the pasha wheel in `dist/` and the `pib` package are installed without a hash check. The eLxr apt packages (rucksack, mmdebstrap, qemu) are whatever the eLxr
 mirror serves when the image is built.
 
 Builds run with `SOURCE_DATE_EPOCH` set to the `Date` of SiMa.ai's signed package index
@@ -46,14 +46,14 @@ keys, version rule, rollback, host side effects) and
 
 ## Get the image
 
-`host/cib` runs the container image `sima-image-builder:<release>`. Use the image SiMa.ai
-provides for the release (set `CIB_IMAGE` to its full name if it is not tagged that way
+`host/pib` runs the container image `sima-image-builder:<release>`. Use the image SiMa.ai
+provides for the release (set `PIB_IMAGE` to its full name if it is not tagged that way
 locally), or build it. Building it needs `dist/pasha-<release>-py3-none-any.whl`, which
 SiMa.ai packs and checks in for each release; the Dockerfile stops with that message
 when the wheel is missing.
 
 ```bash
-docker build -f Dockerfile.cib -t sima-image-builder:3.0.0 .
+docker build -f Dockerfile.pib -t sima-image-builder:3.0.0 .
 ```
 
 The Dockerfile needs BuildKit, the default builder since Docker Engine 23.0 when the
@@ -62,11 +62,11 @@ buildx plugin is installed. On older engines, set `DOCKER_BUILDKIT=1`.
 The build also downloads `elxr-config` (eLxr manifests and overlay) from GitLab at
 a pinned commit and checks its sha256, so it needs access to gitlab.com.
 
-Put `host/cib` on your `PATH`. It needs Docker, runs the container with
+Put `host/pib` on your `PATH`. It needs Docker, runs the container with
 `--privileged -v /dev:/dev` (loop devices, LVM) and mounts the current
-directory at `/workspace`. `CIB_IMAGE` or `SIMA_RELEASE` choose another image tag.
+directory at `/workspace`. `PIB_IMAGE` or `SIMA_RELEASE` choose another image tag.
 `SWU_SIGNING_KEY` (a file or a `pkcs11:` URI) and `SWU_SIGNING_CERT` (a PEM file)
-are passed to `cib sign`; `CIB_CREDENTIALS` (an optional file) is used by `cib build`. Each file is
+are passed to `pib sign`; `PIB_CREDENTIALS` (an optional file) is used by `pib build`. Each file is
 mounted alone, read-only.
 
 ## Workflow
@@ -75,14 +75,14 @@ mounted alone, read-only.
    and the workspace gets a copy of `configs/` and the files the hooks use:
 
    ```bash
-   cib init my-image --flavor minimal --release 3.0.0
+   pib init my-image --flavor minimal --release 3.0.0
    cd my-image
    ```
 
-   `cib init` also writes a `.gitignore` for `keys/*.key`, `keys/*.secret.asc`, `out/` and
+   `pib init` also writes a `.gitignore` for `keys/*.key`, `keys/*.secret.asc`, `out/` and
    `build/`, so a workspace kept in git does not commit secrets or build output.
 
-   To use another set of configs, export `CIB_CONFIGS=<dir>/configs`: the host shim
+   To use another set of configs, export `PIB_CONFIGS=<dir>/configs`: the host shim
    mounts that directory's parent read-only (`--configs` works for a directory inside
    the workspace).
 
@@ -90,44 +90,44 @@ mounted alone, read-only.
    gpg key for custom debs. Keep `ca.key` offline.
 
    ```bash
-   cib keys init --cn 'Your Company'
+   pib keys init --cn 'Your Company'
    ```
 
    `--cn` names the CA (`CN=<cn> SWU CA`), which boards and support see; it defaults
    to `Customer`.
 
-   `cib keys renew` replaces the signing leaf with a new one from the same CA.
-   It needs `ca.key` back in `keys/`; pass the same `--algo` and `--cn` as for `cib keys init`.
+   `pib keys renew` replaces the signing leaf with a new one from the same CA.
+   It needs `ca.key` back in `keys/`; pass the same `--algo` and `--cn` as for `pib keys init`.
 
-3. **Add custom packages** to `custom-debs/` and sign each one. `cib build` accepts
+3. **Add custom packages** to `custom-debs/` and sign each one. `pib build` accepts
    only debs signed by the key in `debs.key`:
 
    ```bash
-   cib sign-deb custom-debs/my-app_1.0_arm64.deb
+   pib sign-deb custom-debs/my-app_1.0_arm64.deb
    ```
 
-   This writes `<deb>.sig`. `cib verify-debs` re-checks them.
+   This writes `<deb>.sig`. `pib verify-debs` re-checks them.
 
 4. **Edit `image.yaml`** (see below), then **build**:
 
    ```bash
-   export CIB_CREDENTIALS=$HOME/cib-credentials   # optional: root:<hash> and sima:<hash> lines
-   cib build            # out/<image>.unsigned.swu, .img, .img.gz, -boot0.be, .cdx.json, .manifest.json, SHA256SUMS
+   export PIB_CREDENTIALS=$HOME/pib-credentials   # optional: root:<hash> and sima:<hash> lines
+   pib build            # out/<image>.unsigned.swu, .img, .img.gz, -boot0.be, .cdx.json, .manifest.json, SHA256SUMS
    ```
 
-   `CIB_CREDENTIALS` is optional: a file outside the workspace with the image's `root`
+   `PIB_CREDENTIALS` is optional: a file outside the workspace with the image's `root`
    and `sima` passwords as crypt hashes, one `user:hash` line each (make a hash with
    `openssl passwd -6`); plain-text passwords are refused. Without it both accounts are
    locked in the image: boards with a rootfs overlay keep their own passwords, and a
    freshly flashed board needs an SSH key in `overlay/`. The repository holds no password.
    The host shim mounts the file read-only, and only its path reaches the build's commands.
 
-   `cib build` never needs the customer signing key: the bundle is built with a
-   throwaway key which is then removed with its signature. `cib build --dev`
+   `pib build` never needs the customer signing key: the bundle is built with a
+   throwaway key which is then removed with its signature. `pib build --dev`
    builds a throwaway-signed bundle that no board will trust (version gets `-dev`).
    A rebuild with the same `version` replaces, and a failed one removes, every
    `out/` file of that version, a signed `.swu` included; bump `version` to keep them.
-   `cib build --supplier 'Acme Corp'` names the supplier in the SBOM (`.cdx.json`) and the
+   `pib build --supplier 'Acme Corp'` names the supplier in the SBOM (`.cdx.json`) and the
    manifest; the default is `SiMa.ai`. The SBOM is also in the bundle as `sbom.cdx.json`,
    covered by its signature, and on the board in `/usr/share/doc/sbom/`.
    The `palette` and `securepalette` flavors also write `simaai-image-palette.manifest`,
@@ -136,30 +136,30 @@ mounted alone, read-only.
 5. **Sign and verify**:
 
    ```bash
-   cib sign             # out/<image>.swu, signed with signing.key / signing.cert
-   cib verify --ca keys/ca.crt --manifest out/<image>.manifest.json out/<image>.swu
+   pib sign             # out/<image>.swu, signed with signing.key / signing.cert
+   pib verify --ca keys/ca.crt --manifest out/<image>.manifest.json out/<image>.swu
    ```
 
-   `cib sign --pkcs11 <uri> --cert keys/swu-signing.crt` signs with a key held
+   `pib sign --pkcs11 <uri> --cert keys/swu-signing.crt` signs with a key held
    in an HSM or token through the OpenSSL PKCS#11 engine (tested with a SoftHSM
    module added to the container). The host shim mounts no token: run the container
    directly with the token's device or `pcscd` socket mounted, and set
    `PKCS11_MODULE_PATH` if the engine does not find the module. Signing can run
    on any host that only has the bundle.
 
-   `cib sign --encrypt` also encrypts `rootfs.ext4.gz` and `boot.vfat.gz` with
-   AES-256-CBC. Create the key once with `cib keys payload` and set `encryption.key`
-   before `cib build`, so the image holds the key and decrypts later bundles by itself.
+   `pib sign --encrypt` also encrypts `rootfs.ext4.gz` and `boot.vfat.gz` with
+   AES-256-CBC. Create the key once with `pib keys payload` and set `encryption.key`
+   before `pib build`, so the image holds the key and decrypts later bundles by itself.
    See the customer guide for what this does and does not protect.
 
-6. **Other commands**: `cib diff --against <sbom-or-manifest>` lists package
-   differences; `cib clean [--yes]` lists (or with `--yes` detaches) loop devices
+6. **Other commands**: `pib diff --against <sbom-or-manifest>` lists package
+   differences; `pib clean [--yes]` lists (or with `--yes` detaches) loop devices
    and volume groups left by an interrupted build. It matches every `elxr-*-<target>-*.img`
    loop device on the host, other workspaces' builds included.
 
 ## `image.yaml`
 
-`cib init` writes the first eight rows; the rest are optional.
+`pib init` writes the first eight rows; the rest are optional.
 
 | Key | Meaning |
 |---|---|
@@ -171,7 +171,7 @@ mounted alone, read-only.
 | `hooks` | A list of script files in the workspace, run in order after SiMa.ai's customize hooks (paths: letters, digits and `_ . / + -` only). |
 | `signing.cert`, `signing.key`, `signing.ca` | Bundle signing leaf and key; `ca` is installed in the image as `/etc/swupdate/swupdate.crt`. |
 | `debs.key` | Public key that `custom-debs/*.deb` signatures must come from. |
-| `encryption.key` | Payload key file from `cib keys payload`. The build installs it as `/etc/swupdate/aes.key` (mode 600); `cib sign --encrypt` encrypts with it. |
+| `encryption.key` | Payload key file from `pib keys payload`. The build installs it as `/etc/swupdate/aes.key` (mode 600); `pib sign --encrypt` encrypts with it. |
 | `vendor` | One line written to `/etc/buildinfo` as `VENDOR = ...`. |
 | `swu.description`, `swu.script` | Your own `sw-description` and update script. The description must contain `@@VERSION@@`, `@@HW_COMPAT@@`, `@@<member>@@` for every hash, and list `boot0.be` and `sbom.cdx.json`. |
 | `sources` | List of apt lines replacing the Debian and eLxr ones (for a mirror). |
@@ -183,7 +183,7 @@ mounted alone, read-only.
   or `atf-*` package (tRoot and ATF are SiMa.ai's), no `u-boot-<target>` and no second kernel. The image must end up with exactly one
   kernel, one U-Boot and one ATF package.
 - `/boot/u-boot.bin` must be the U-Boot inside `/boot/fip.bin`. The board boots the
-  one in `fip.bin`, which the ATF package carries and CIB does not rebuild.
+  one in `fip.bin`, which the ATF package carries and PIB does not rebuild.
 - `boot0.be` in the bundle must have the md5 listed for `boot/Release/boot0.be` in the
   `md5sums` of the tRoot package the image installs (`troot-modalix`, or
   `troot-modalix-secure` for `securepalette`; downloaded from the SiMa.ai release apt line,

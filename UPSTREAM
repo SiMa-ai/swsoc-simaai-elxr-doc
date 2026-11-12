@@ -8,17 +8,17 @@ Changed from upstream:
   defaults to https://repo.sima.ai/elxr/deb/release. hooks/minimal.sh downloads no apt
   key. The public key is configs/images/files/simaai-public.asc; hooks/base.sh copies
   the SiMa.ai apt keyring into the image for the signed-by of the SiMa.ai line only.
-- hooks/base.sh: the root and sima passwords come from CIB_CREDENTIALS (locked
+- hooks/base.sh: the root and sima passwords come from PIB_CREDENTIALS (locked
   without it), root SSH login stays key-only, and each board makes its own SSH host
   keys on first boot (simaai-ssh-hostkeys.service).
 - hooks/palette.sh writes its manifest, du and licenses files to OUTPUT_DIR (out/),
   which the hpalette/hsecurepalette lines in image-params.yaml pass to it.
 - The troot_upgrade.efi stage fails the build when the file is missing.
-  prepare_buildinfo.sh falls back to "cib" without git.
+  prepare_buildinfo.sh falls back to "pib" without git.
 - files/update_modalix.sh: preinst removes a stale /tmp boot0 and OS marker
   (rm -f "$BOOT0" "$OSMARK"); release_boot() unmounts the inactive boot partition
   when postinst fails with it mounted and in postfailure, so a retry does not write
   under a mount; postinst refuses an inactive rootfs that is not one linear
   device-mapper segment; the postfailure message no longer has the comma inside the
   quoted slot UUID.
-- Comments are reworded for CIB throughout configs/images.
+- Comments are reworded for PIB throughout configs/images.

@@ -1,6 +1,6 @@
 # Customer guide
 
-How to build, sign and ship your own image and update bundle (`.swu`) with CIB.
+How to build, sign and ship your own image and update bundle (`.swu`) with PIB.
 The command reference and the `image.yaml` options are in the [README](../README.md);
 this guide covers what you need to know around them.
 
@@ -15,19 +15,19 @@ this guide covers what you need to know around them.
   minimal and 5.6 GB for palette, the slot sizes) is built inside the container, so
   Docker's storage location
   needs that space too. Keep 10 GB free for minimal and 20 GB for palette.
-- To build the container yourself: a CIB checkout (it carries the pasha wheel SiMa.ai
+- To build the container yourself: a PIB checkout (it carries the pasha wheel SiMa.ai
   packs for the release) and access to gitlab.com. The image configs ship in
   it and in the container.
 
 ## Workflow
 
-Create a workspace, make keys, sign your debs, edit `image.yaml`, then `cib build`,
-`cib sign`, `cib verify` and install. The steps are in the README. Two properties
+Create a workspace, make keys, sign your debs, edit `image.yaml`, then `pib build`,
+`pib sign`, `pib verify` and install. The steps are in the README. Two properties
 matter for how you organise it:
 
-- `cib build` never needs your signing key. It builds with a throwaway key and removes
+- `pib build` never needs your signing key. It builds with a throwaway key and removes
   that signature, so the build host can be an ordinary CI machine.
-- `cib sign` needs only the unsigned `.swu` and your key (a PEM file or an HSM/token via
+- `pib sign` needs only the unsigned `.swu` and your key (a PEM file or an HSM/token via
   PKCS#11), so signing can run on a separate, locked-down host.
 
 ## Keys and who holds them
@@ -39,32 +39,32 @@ matter for how you organise it:
 | `keys/swu-signing.key`, `.crt` | The leaf that signs bundles | On the signing host only |
 | `keys/debs-signing.secret.asc`, `.asc` | gpg key for custom `.deb` files | Secret key on the build side; the public key is checked at build time |
 
-`cib keys init` writes the private keys without a passphrase, mode 600: only file
+`pib keys init` writes the private keys without a passphrase, mode 600: only file
 permissions and where you keep them protect them. Keep the signing key in an HSM or token
-(`cib sign --pkcs11`) if the signing host is shared. The CA is valid for 10 years and the
+(`pib sign --pkcs11`) if the signing host is shared. The CA is valid for 10 years and the
 signing leaf for 825 days; renew the leaf (below) before it expires.
 
 A board trusts what is in `/etc/swupdate/swupdate.crt`. You can rotate the signing leaf
 without touching boards, as long as the new leaf is issued by the same CA: put `ca.key`
-back in `keys/`, run `cib keys renew`, and move `ca.key` offline again. Changing the
+back in `keys/`, run `pib keys renew`, and move `ca.key` offline again. Changing the
 CA means shipping a bundle signed under the old CA whose image carries the new
 `ca.crt`: build with `signing.ca` pointing at the new CA, then set `signing.ca` back
-to the old CA before `cib sign`, which checks the leaf against it (or name the
+to the old CA before `pib sign`, which checks the leaf against it (or name the
 bundle and sign with `--key`/`--cert` from a directory holding neither `image.yaml`
 nor `keys/ca.crt`).
 
 ## Encrypted bundles
 
-`cib sign --encrypt` encrypts the rootfs and boot payloads of a bundle with AES-256-CBC,
+`pib sign --encrypt` encrypts the rootfs and boot payloads of a bundle with AES-256-CBC,
 each with its own IV recorded in the signed `sw-description`. `boot0.be`, the SBOM and the update
 script stay in the clear. To use it:
 
-1. `cib keys payload` writes `keys/payload.key` (the key and a default IV, in the
+1. `pib keys payload` writes `keys/payload.key` (the key and a default IV, in the
    format `swupdate -K` reads).
 2. Set `encryption: {key: keys/payload.key}` in `image.yaml` and build. The image then
    holds the key as `/etc/swupdate/aes.key`, readable by root only, and
    `/etc/swupdate.cfg` names it.
-3. `cib sign --encrypt` (or `--aes-key <file>` on a signing host without `image.yaml`).
+3. `pib sign --encrypt` (or `--aes-key <file>` on a signing host without `image.yaml`).
 
 A board installs an encrypted bundle only if its running image already holds the key.
 For the first one, install an unencrypted bundle of an image built with
@@ -99,8 +99,8 @@ The version is `<SiMa.ai release>.<your build>`, all numeric: `3.0.0.4`. Your bu
 `no-downgrading` setting is its own version), and an equal version installs.
 
 It must be numeric because the board's `swupdate` compares versions as semantic versions
-only when they are digits and dots; `3.0.0-cib.1` sorts as older than `3.0.0`, so a
-board running `3.0.0` would refuse it. `cib build` rejects anything else.
+only when they are digits and dots; `3.0.0-pib.1` sorts as older than `3.0.0`, so a
+board running `3.0.0` would refuse it. `pib build` rejects anything else.
 
 ## Installing and rollback
 
@@ -123,7 +123,7 @@ local changes under `/data/overlay`; it cannot be rolled back.
 ## tRoot (boot firmware)
 
 Bundles carry SiMa.ai's `boot0.be` from the release's `troot-*` package. tRoot
-is SiMa.ai's and cannot be replaced through CIB. The build refuses a `troot-*` package
+is SiMa.ai's and cannot be replaced through PIB. The build refuses a `troot-*` package
 in `custom-debs/`, checks that the package came from SiMa.ai's repository (unless you
 use your own mirror), and fails with `md5 check failed for boot0.be` unless the bundle's
 file has the md5 SiMa.ai lists for `boot/Release/boot0.be` in the release tRoot package
@@ -139,7 +139,7 @@ You can replace the kernel with your own `.deb` file in `custom-debs/`.
 ATF and tRoot hold the root of trust and come from SiMa.ai: the build refuses an
 `atf-*` or `troot-*` package in `custom-debs/`. It also refuses `u-boot-modalix`:
 the board boots the U-Boot inside `/boot/fip.bin`, which the ATF package carries and
-CIB does not rebuild.
+PIB does not rebuild.
 Keep SiMa.ai's kernel package name (`linux-image-6.18.3-modalix`) with a higher version. The flavor's package list installs
 `linux-image-6.18.3-modalix*`, so a kernel with another name is either not installed
 or (if it matches that pattern or is listed in `packages.add`) a second one.
@@ -147,7 +147,7 @@ The image must end up with exactly one kernel, U-Boot and ATF package, with `/bo
 and `/boot/fitImage` present and a single `lib/linux-image-*` directory. Your debs are
 pinned so `apt upgrade` on a board leaves them alone.
 
-CIB does not sign kernels: signing belongs to the package build. On
+PIB does not sign kernels: signing belongs to the package build. On
 `securepalette`, where U-Boot enforces the kernel FIT signature, the build checks that
 the image's `fitImage` verifies against the keys its U-Boot requires, and fails
 instead of producing a bundle that will not boot. SiMa.ai's release packages are
@@ -170,14 +170,14 @@ Building changes things on the host outside the workspace:
   handler (qemu-user-static) must already be installed and enabled, or the container
   stops at start.
 - Loop devices and LVM: the build attaches the image to a loop device and creates a
-  volume group. An interrupted build can leave both behind; `cib clean` lists them and
-  `cib clean --yes` removes them. It matches every `elxr-*-<target>-*.img` loop device on the
+  volume group. An interrupted build can leave both behind; `pib clean` lists them and
+  `pib clean --yes` removes them. It matches every `elxr-*-<target>-*.img` loop device on the
   host, not only this workspace's: do not run it while any build on the host is running.
 - The container is started `--privileged` with the host's `/dev` mounted.
 
 ## Defaults you should change before shipping
 
-The repository holds no password. Without `CIB_CREDENTIALS`, `root` and `sima` are locked
+The repository holds no password. Without `PIB_CREDENTIALS`, `root` and `sima` are locked
 in the image. With it, their passwords come from that file: one `root:<hash>` and one
 `sima:<hash>` line, hashes made with `openssl passwd -6`; a plain-text password is refused.
 Keep the file outside the workspace.
@@ -194,8 +194,8 @@ that knew the old ones warns that the host key changed.
 
 A board whose passwords were changed on the board keeps them through an update: the
 changed `/etc/shadow` lives in the rootfs overlay. The image's accounts, locked or from
-`CIB_CREDENTIALS`, reach a freshly flashed board, a board whose passwords were never
-changed, and any board after `SWUPDATE_CLEAN_OVERLAY=1`; without `CIB_CREDENTIALS`
+`PIB_CREDENTIALS`, reach a freshly flashed board, a board whose passwords were never
+changed, and any board after `SWUPDATE_CLEAN_OVERLAY=1`; without `PIB_CREDENTIALS`
 such a board needs an SSH key in `overlay/`.
 
 The update script (`configs/images/files/update_modalix.sh`) has four known limitations

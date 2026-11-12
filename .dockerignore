@@ -3,9 +3,9 @@
 !files/
 !dist/*.whl
 !dist/*.txt
-!cib/
+!pib/
 !configs/
 !scripts/
-cib/build/
-cib/*.egg-info/
+pib/build/
+pib/*.egg-info/
 **/__pycache__/

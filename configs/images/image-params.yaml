@@ -81,7 +81,7 @@ vg: simaai_${flavor}${oc.env:VG_SUFFIX,${vgsuffix:}}
 dm_pv: /dev/mmcblk0p3
 
 # Which rootfs slots the build populates: "a" or "ab". Set with ROOTFS_SLOTS
-# ("a" when unset; cib build sets it from image.yaml, default "ab"); the
+# ("a" when unset; pib build sets it from image.yaml, default "ab"); the
 # stages validate the value before anything is built.
 #
 # "a" writes slot A and does not allocate slot B at all, so the artifact
@@ -228,7 +228,7 @@ write_a: ${params.wroot_a}
 write_ab: ${concat:${params.wroot_a},${params.wroot_b}}
 
 hbase:
-- PLATFORM=${platform} VERSION=${version} CODENAME=${codename} BUILD=${oc.env:BUILD, 0} CIB_CREDENTIALS=${oc.env:CIB_CREDENTIALS,''} CURRENT_DIR=${oc.env:CURRENT_DIR} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/base.sh $1
+- PLATFORM=${platform} VERSION=${version} CODENAME=${codename} BUILD=${oc.env:BUILD, 0} PIB_CREDENTIALS=${oc.env:PIB_CREDENTIALS,''} CURRENT_DIR=${oc.env:CURRENT_DIR} sh ${oc.env:CURRENT_DIR}/configs/images/hooks/base.sh $1
 hminimal:
 - sh ${oc.env:CURRENT_DIR}/configs/images/hooks/minimal.sh $1
 hpalette:

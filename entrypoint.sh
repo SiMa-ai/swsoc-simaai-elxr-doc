@@ -4,34 +4,34 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# Customer Image Builder container entrypoint.
+# Palette Image Builder container entrypoint.
 #
-# For "cib build" and a shell, prepares what "rs build" expects from its
-# surroundings, then runs the given command (bash when none); other cib commands run directly:
+# For "pib build" and a shell, prepares what "rs build" expects from its
+# surroundings, then runs the given command (bash when none); other pib commands run directly:
 #   - a check for the host's arm64 binfmt handler, so mmdebstrap can run arm64 maintainer
 #     scripts under qemu-user-static on an x86-64 host
 #   - a local apt repo at http://localhost/deb/custom holding every .deb in
 #     /workspace/custom-debs, signed with a key made for this run alone; the
 #     image's apt pinning ranks it above SiMa.ai's repo, so a customer
 #     kernel replaces SiMa.ai's
-#   - SOURCE_DATE_EPOCH from /etc/cib-release-epoch (the release's package
+#   - SOURCE_DATE_EPOCH from /etc/pib-release-epoch (the release's package
 #     index date, read when the image was built), for reproducible file times
 #
 # Inputs (environment):
-#   CIB_CODENAME     - suite the repo publishes (set by the Dockerfile)
+#   PIB_CODENAME     - suite the repo publishes (set by the Dockerfile)
 #   SWU_SIGNING_KEY,
-#   SWU_SIGNING_CERT - used by "cib sign" only; "cib build" never needs them
+#   SWU_SIGNING_CERT - used by "pib sign" only; "pib build" never needs them
 set -eo pipefail
 
-# Other cib commands need none of the set-up below.
+# Other pib commands need none of the set-up below.
 case "${1:-} ${2:-}" in
-    "cib build" | bash*) ;;
-    cib\ *) exec "$@" ;;
+    "pib build" | bash*) ;;
+    pib\ *) exec "$@" ;;
 esac
 
 DEBS=/workspace/custom-debs
 REPO_DIR=/var/www/html/deb/custom
-KEY_UID="CIB local repo <cib-local-repo@localhost>"
+KEY_UID="PIB local repo <pib-local-repo@localhost>"
 
 # --- arm64 emulation ----------------------------------------------------------
 # The host must provide the arm64 binfmt handler; mounting binfmt_misc only shows the host's entries.
@@ -41,16 +41,16 @@ fi
 if [ "$(uname -m)" != "aarch64" ]; then
     case "$(head -n1 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null)" in
         enabled) ;;
-        disabled) echo "cib: the host's qemu-aarch64 binfmt handler is disabled;" \
+        disabled) echo "pib: the host's qemu-aarch64 binfmt handler is disabled;" \
                        "enable it on the host" >&2; exit 1 ;;
-        *) echo "cib: no arm64 binfmt handler; install qemu-user-static on the host" >&2; exit 1 ;;
+        *) echo "pib: no arm64 binfmt handler; install qemu-user-static on the host" >&2; exit 1 ;;
     esac
     # Without the F flag the interpreter must exist in the container; with it the kernel holds it open.
     entry=/proc/sys/fs/binfmt_misc/qemu-aarch64
     interp="$(sed -n 's/^interpreter //p' "$entry")"
     case "$(sed -n 's/^flags: //p' "$entry")" in
         *F*) ;;
-        *) [ -x "$interp" ] || { echo "cib: the host's arm64 binfmt handler" \
+        *) [ -x "$interp" ] || { echo "pib: the host's arm64 binfmt handler" \
                "has no F flag and $interp is not in the container;" \
                "re-register it with the F flag (qemu-user-static)" >&2; exit 1; } ;;
     esac
@@ -63,7 +63,7 @@ fi
 GNUPGHOME="$(mktemp -d)"
 export GNUPGHOME
 gpg --batch --passphrase '' --quick-gen-key "$KEY_UID" ed25519 sign never 2>/dev/null || {
-    echo "cib: cannot create the local repo signing key" >&2; exit 1; }
+    echo "pib: cannot create the local repo signing key" >&2; exit 1; }
 gpg --batch --export "$KEY_UID" > /usr/share/keyrings/custom-repo.gpg
 
 # --- local repo contents ------------------------------------------------------
@@ -75,25 +75,25 @@ shopt -s nullglob
 debs=("$DEBS"/*.deb)
 shopt -u nullglob
 # With a workspace image.yaml, only .debs signed by the customer's key
-# (debs.key) may enter the local repo. cib build checks them itself; a shell does not.
-if [ -f image.yaml ] && [ ${#debs[@]} -gt 0 ] && [ "${1:-}" != cib ]; then
-    cib verify-debs
+# (debs.key) may enter the local repo. pib build checks them itself; a shell does not.
+if [ -f image.yaml ] && [ ${#debs[@]} -gt 0 ] && [ "${1:-}" != pib ]; then
+    pib verify-debs
 fi
 for deb in "${debs[@]}"; do
     f="$(dpkg-deb -W --showformat='${Architecture}|${Package}|${Version}|${Section}|${Priority}' "$deb")"
     IFS='|' read -r arch pkg ver sec pri <<<"$f"
     case "$arch" in
         arm64|all) ;;
-        *) echo "cib: $deb is for $arch, not arm64" >&2; exit 1 ;;
+        *) echo "pib: $deb is for $arch, not arm64" >&2; exit 1 ;;
     esac
-    echo "cib: adding $pkg $ver"
+    echo "pib: adding $pkg $ver"
     # reprepro refuses a .deb without Section/Priority; default only those.
     defaults=()
     [ -n "$sec" ] || defaults+=(-S misc)
     [ -n "$pri" ] || defaults+=(-P optional)
-    reprepro -b "$REPO_DIR" --export=silent-never -C non-free "${defaults[@]}" includedeb "$CIB_CODENAME" "$deb"
+    reprepro -b "$REPO_DIR" --export=silent-never -C non-free "${defaults[@]}" includedeb "$PIB_CODENAME" "$deb"
 done
-reprepro -b "$REPO_DIR" export "$CIB_CODENAME"
+reprepro -b "$REPO_DIR" export "$PIB_CODENAME"
 # The signing key is not needed past this point: stop the agent and drop the key.
 gpgconf --kill all 2>/dev/null || true
 rm -rf "$GNUPGHOME"
@@ -101,5 +101,5 @@ unset GNUPGHOME
 
 pgrep -x nginx >/dev/null 2>&1 || nginx
 
-export SOURCE_DATE_EPOCH="$(< /etc/cib-release-epoch)"
+export SOURCE_DATE_EPOCH="$(< /etc/pib-release-epoch)"
 exec "$@"

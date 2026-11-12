@@ -1,4 +1,4 @@
-"""cib: SiMa.ai Customer Image Builder. Runs inside the CIB container."""
+"""pib: SiMa.ai Palette Image Builder. Runs inside the PIB container."""
 import argparse
 import contextlib
 import hashlib
@@ -19,10 +19,10 @@ from pathlib import Path
 
 import yaml
 
-from cib import __version__
+from pib import __version__
 
 DEBS = "custom-debs"
-BAKED_CONFIGS = Path("/usr/share/cib/configs")  # the image configs shipped in the container
+BAKED_CONFIGS = Path("/usr/share/pib/configs")  # the image configs shipped in the container
 VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)")  # use fullmatch
 # image.yaml fields and the type each must have (release/version/slots may be numbers).
 FIELDS = {"base": str, "target": str, "release": (str, int, float), "version": (str, int, float),
@@ -30,7 +30,7 @@ FIELDS = {"base": str, "target": str, "release": (str, int, float), "version": (
           "signing": dict, "debs": dict, "vendor": (str, int, float), "swu": dict,
           "sources": list, "sima_source": str, "encryption": dict}
 AES_KEY_RE = re.compile(r"[0-9a-f]{64} [0-9a-f]{32}")  # swupdate -K file: <key> <ivt>
-ENCRYPTED = ("rootfs.ext4.gz", "boot.vfat.gz")  # the payloads cib sign --encrypt covers
+ENCRYPTED = ("rootfs.ext4.gz", "boot.vfat.gz")  # the payloads pib sign --encrypt covers
 SAFE_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")  # paths that go into YAML and a shell command line
 # Repo-root items the image hooks reach through CURRENT_DIR or symlinks.
 REPO_ITEMS = ("elxr-config", "scripts/build_scripts/prepare_buildinfo.sh",
@@ -48,11 +48,11 @@ overlay: overlay/         # copied over / after SiMa.ai's overlays
 hooks: []                 # run after SiMa.ai's customize hooks
 signing:
   cert: keys/swu-signing.crt
-  key: keys/swu-signing.key   # cib sign also takes --pkcs11 <uri>
+  key: keys/swu-signing.key   # pib sign also takes --pkcs11 <uri>
   ca: keys/ca.crt             # boards trust it: /etc/swupdate/swupdate.crt
 debs:
   key: keys/debs-signing.asc  # custom-debs/*.deb need a <name>.deb.sig by this key
-# encryption: {{key: keys/payload.key}}   # cib keys payload; for cib sign --encrypt
+# encryption: {{key: keys/payload.key}}   # pib keys payload; for pib sign --encrypt
 # vendor: Acme              # written to /etc/buildinfo
 # swu: {{description: swu/sw-description, script: swu/update.sh}}
 # sources: ["deb http://mirror.corp/debian trixie main"]   # replaces the Debian/eLxr lines
@@ -61,10 +61,10 @@ debs:
 
 
 GITIGNORE = """\
-# written by cib init: secrets and build output stay out of git
+# written by pib init: secrets and build output stay out of git
 keys/*.key
 keys/*.secret.asc
-keys/.cib-renew-*/
+keys/.pib-renew-*/
 out/
 build/
 """
@@ -81,7 +81,7 @@ exec swupdate -f /etc/swupdate.cfg -i "$bundle" "$@"
 
 
 def die(msg):
-    sys.exit(f"cib: {msg}")
+    sys.exit(f"pib: {msg}")
 
 
 def run(cmd, **kw):
@@ -92,8 +92,8 @@ def run(cmd, **kw):
 
 
 def chown(*paths):
-    """Hand root-made files back to the host user (CIB_UID/CIB_GID from the shim)."""
-    uid, gid = os.environ.get("CIB_UID"), os.environ.get("CIB_GID")
+    """Hand root-made files back to the host user (PIB_UID/PIB_GID from the shim)."""
+    uid, gid = os.environ.get("PIB_UID"), os.environ.get("PIB_GID")
     if uid and gid:
         for root in map(Path, paths):
             for p in [root, *(root.rglob("*") if root.is_dir() else [])]:
@@ -123,7 +123,7 @@ def subj(cn, role):
     return f"/CN={cn} {role}"
 
 
-RENEW_TMP = ".cib-renew-"  # work dir in keys/; holds a key copy while the pair is swapped
+RENEW_TMP = ".pib-renew-"  # work dir in keys/; holds a key copy while the pair is swapped
 
 
 @contextlib.contextmanager
@@ -226,7 +226,7 @@ def cmd_sign_deb(a):
         gpg(h, "--import", a.key)
         gpg(h, "--yes", "--detach-sign", "--output", f"{deb}.sig", deb)
     chown(f"{deb}.sig")
-    print(f"cib: wrote {deb}.sig")
+    print(f"pib: wrote {deb}.sig")
 
 
 def cmd_keys_init(a):
@@ -237,7 +237,7 @@ def cmd_keys_init(a):
     gen_keys(a.out, a.algo, a.cn)
     gen_deb_key(a.out, a.cn)
     chown(a.out)
-    print(f"cib: keys written to {a.out}; keep ca.key offline")
+    print(f"pib: keys written to {a.out}; keep ca.key offline")
 
 
 def gen_payload_key(out):
@@ -254,7 +254,7 @@ def gen_payload_key(out):
 def cmd_keys_payload(a):
     gen_payload_key(a.out)
     chown(a.out)
-    print(f"cib: payload key written to {a.out}/payload.key; set encryption.key in "
+    print(f"pib: payload key written to {a.out}/payload.key; set encryption.key in "
           "image.yaml so the image holds it, and keep it secret")
 
 
@@ -262,7 +262,7 @@ def read_aes_key(path):
     """The hex AES key of a payload key file."""
     f = Path(path)
     if not f.is_file():
-        die(f"{f} not found (cib keys payload creates it)")
+        die(f"{f} not found (pib keys payload creates it)")
     text = f.read_text().strip()
     if not AES_KEY_RE.fullmatch(text):
         die(f"{f} must hold '<64 hex key> <32 hex ivt>' on one line")
@@ -279,7 +279,7 @@ def cmd_keys_renew(a):
     except OSError as e:
         die(f"cannot write the new signing leaf: {e}")
     chown(out / "swu-signing.key", out / "swu-signing.crt")
-    print(f"cib: new signing leaf written to {out}; keep ca.key offline")
+    print(f"pib: new signing leaf written to {out}; keep ca.key offline")
 
 
 # ---- workspace --------------------------------------------------------------
@@ -288,7 +288,7 @@ def cmd_init(a):
     ws = Path(a.dir)
     if (ws / "image.yaml").exists():
         die(f"{ws}/image.yaml exists")
-    configs = Path(a.configs or os.environ.get("CIB_CONFIGS")
+    configs = Path(a.configs or os.environ.get("PIB_CONFIGS")
                    or ("configs" if Path("configs").is_dir() else BAKED_CONFIGS))
     ref = configs / "images" / f"image-{a.flavor}-{a.target}.yaml"
     if not ref.is_file():
@@ -305,7 +305,7 @@ def cmd_init(a):
         if not src.exists():  # e.g. elxr-config, which only the container carries
             src = BAKED_CONFIGS.parent / rel
         if not src.exists():
-            print(f"cib: warning: {src} not found; the build may fail",
+            print(f"pib: warning: {src} not found; the build may fail",
                   file=sys.stderr)
         elif src.resolve() != dst.resolve():
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -320,7 +320,7 @@ def cmd_init(a):
     if not (ws / ".gitignore").exists():
         (ws / ".gitignore").write_text(GITIGNORE)
     chown(ws)
-    print(f"cib: workspace ready in {ws}")
+    print(f"pib: workspace ready in {ws}")
 
 
 def read_yaml(f):
@@ -336,7 +336,7 @@ def read_yaml(f):
 def load_config(ws):
     f = ws / "image.yaml"
     if not f.is_file():
-        die(f"{f} not found; run 'cib init' first")
+        die(f"{f} not found; run 'pib init' first")
     cfg = read_yaml(f)
     missing = [k for k in ("base", "target", "release", "version")
                if k not in cfg]
@@ -424,10 +424,10 @@ def check_debs(ws, cfg):
 
 def check_repo(debs):
     """Every custom .deb must be in the signed local repo the entrypoint built."""
-    repo = Path(os.environ.get("CIB_REPO_DIR", "/var/www/html/deb/custom"))
-    codename = os.environ.get("CIB_CODENAME")
+    repo = Path(os.environ.get("PIB_REPO_DIR", "/var/www/html/deb/custom"))
+    codename = os.environ.get("PIB_CODENAME")
     if not codename:
-        die("CIB_CODENAME is not set; run inside the CIB container")
+        die("PIB_CODENAME is not set; run inside the PIB container")
     dist = repo / "dists" / codename
     if not (dist / "Release").is_file():
         die(f"local repo {dist} is not published; start via the entrypoint")
@@ -467,7 +467,7 @@ def check_description(text, members):
 
 
 def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
-    """Write cib-* copies of the reference flavor, params and stages.
+    """Write pib-* copies of the reference flavor, params and stages.
 
     trust is installed in the rootfs as /etc/swupdate/swupdate.crt
     with an /etc/swupdate.cfg that uses it and refuses older versions; debs
@@ -490,9 +490,9 @@ def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
     flavor = sub1(flavor_f.read_text(), r"^version: .*$",
                   lambda m: f"version: {version}", "version line")
     flavor = sub1(flavor, r"package:image-params\.yaml",
-                  lambda m: "package:cib-params.yaml", "params reference")
+                  lambda m: "package:pib-params.yaml", "params reference")
     flavor = sub1(flavor, r"package:image-stages\.yaml",
-                  lambda m: "package:cib-stages.yaml", "stages reference")
+                  lambda m: "package:pib-stages.yaml", "stages reference")
 
     params = (img / "image-params.yaml").read_text()
     if extra:
@@ -507,7 +507,7 @@ def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
     overlay = ws / rel
     if ws.resolve() not in overlay.resolve().parents:
         die(f"image.yaml: overlay must be a folder inside the workspace, not {rel!r}")
-    # cib init writes the default "overlay/"; git drops that folder while empty.
+    # pib init writes the default "overlay/"; git drops that folder while empty.
     if Path(rel) != Path("overlay") and not overlay.is_dir():
         die(f"overlay folder {overlay} not found")
     syncs = [img / "overlay/elxr", img / "overlay/simaai"]
@@ -530,10 +530,10 @@ def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
         (tdir / "etc/swupdate/aes.key").write_text(Path(aes_key).read_text())
     if debs:
         (tdir / "etc/apt/preferences.d").mkdir(parents=True)
-        (tdir / "etc/apt/preferences.d/99cib-custom").write_text("".join(
+        (tdir / "etc/apt/preferences.d/99pib-custom").write_text("".join(
             f"Package: {p}\nPin: version {v}\nPin-Priority: 1001\n\n"
             for p, v in debs))
-    # sync-in keeps each file's on-disk owner, the host user after cib init, so
+    # sync-in keeps each file's on-disk owner, the host user after pib init, so
     # every overlay goes in as a tar whose members are all root:root instead.
     sdir = ws / "build/sync"
     shutil.rmtree(sdir, ignore_errors=True)
@@ -560,7 +560,7 @@ def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
     if not re.fullmatch(r"[a-z0-9_]+", cfg["target"]):
         die(f"target {cfg['target']!r} has unsupported characters")
     # Runs last: tags package origins, checks one boot chain, adds the vendor.
-    finish = f"cib _finish $1 {(ws / 'build').resolve()}"
+    finish = f"pib _finish $1 {(ws / 'build').resolve()}"
     items = ",".join(json.dumps(x) for x in
                      [*(f"sh {h.resolve()} $1" for h in hooks), finish])
     stages = sub1(
@@ -604,10 +604,10 @@ def write_effective(ws, cfg, version, trust, debs, aes_key, supplier):
             stages, r"^( *)- deb http://deb\.debian\.org[^\n]*\n(?:\1- deb [^\n]*\n){3}",
             lambda m: "".join(f"{m[1]}- {json.dumps(x)}\n" for x in src), "apt sources")
 
-    target = img / f"cib-{base}-{cfg['target']}.yaml"
+    target = img / f"pib-{base}-{cfg['target']}.yaml"
     target.write_text(flavor)
-    (img / "cib-params.yaml").write_text(params)
-    (img / "cib-stages.yaml").write_text(stages)
+    (img / "pib-params.yaml").write_text(params)
+    (img / "pib-stages.yaml").write_text(stages)
     shutil.copy(target, ws / "build/effective.yaml")
     return target
 
@@ -622,17 +622,17 @@ def check_issued(cert, ca):
 
 
 def build_signing(ws, cfg, dev):
-    """(key, cert, trust): the swu stage gets a throwaway key; cib sign signs."""
+    """(key, cert, trust): the swu stage gets a throwaway key; pib sign signs."""
     if not dev:
         ca = ws / ((cfg.get("signing") or {}).get("ca") or "keys/ca.crt")
         if not ca.is_file():
-            die(f"{ca} not found (cib keys init creates it); without it the "
+            die(f"{ca} not found (pib keys init creates it); without it the "
                 "image would trust no key")
     d = ws / "build/dev-keys"
     shutil.rmtree(d, ignore_errors=True)
-    gen_keys(d, cn="CIB dev")
+    gen_keys(d, cn="PIB dev")
     if dev:
-        print("cib: WARNING: --dev uses a throwaway key; do not ship this image",
+        print("pib: WARNING: --dev uses a throwaway key; do not ship this image",
               file=sys.stderr)
     return d / "swu-signing.key", d / "swu-signing.crt", d / "ca.crt" if dev else ca.resolve()
 
@@ -641,17 +641,17 @@ CRED_LINE = re.compile(r"(root|sima):\$[0-9a-z]+\$\S+")  # a crypt(3) hash, neve
 
 
 def check_credentials():
-    """The optional CIB_CREDENTIALS file: one root:<hash> and one sima:<hash> line, as chpasswd -e reads it."""
-    path = os.environ.get("CIB_CREDENTIALS")
+    """The optional PIB_CREDENTIALS file: one root:<hash> and one sima:<hash> line, as chpasswd -e reads it."""
+    path = os.environ.get("PIB_CREDENTIALS")
     if not path:
-        print("cib: no CIB_CREDENTIALS: root and sima are locked; boards with a rootfs overlay keep "
+        print("pib: no PIB_CREDENTIALS: root and sima are locked; boards with a rootfs overlay keep "
               "their passwords, a fresh flash or clean-overlay update needs an SSH key in overlay/", file=sys.stderr)
         return
     if not SAFE_PATH.fullmatch(path):  # the path goes into a hook command line
-        die(f"CIB_CREDENTIALS {path!r}: paths used in hooks may only hold letters, digits and _ . / + -")
+        die(f"PIB_CREDENTIALS {path!r}: paths used in hooks may only hold letters, digits and _ . / + -")
     f = Path(path)
     if not f.is_file():
-        die(f"CIB_CREDENTIALS {f} not found")
+        die(f"PIB_CREDENTIALS {f} not found")
     users = []
     for n, ln in enumerate(f.read_text().splitlines(), 1):
         if not CRED_LINE.fullmatch(ln):
@@ -687,13 +687,13 @@ def cmd_build(a):
                    ROOTFS_SLOTS=slots, SWU_SIGNING_KEY=str(key), SWU_SIGNING_CERT=str(cert))
         if cfg.get("sima_source"):
             env["MIRROR_1"] = str(cfg["sima_source"])
-        log = ws / "configs/images/mmdebstrap.log"  # a cib _finish refusal ends up there
+        log = ws / "configs/images/mmdebstrap.log"  # a pib _finish refusal ends up there
         log.unlink(missing_ok=True)
         r = subprocess.run(["rs", "build", "--config",
                             str(config.relative_to(ws))], cwd=ws, env=env)
         if r.returncode:
             discard(out, stem)
-            why = [ln[5:] for ln in log.read_text().splitlines() if ln.startswith("cib: ")] \
+            why = [ln[5:] for ln in log.read_text().splitlines() if ln.startswith("pib: ")] \
                 if log.is_file() else []
             die("\n".join([*why, f"rs build failed with exit code {r.returncode}; "
                              f"out/{stem}* removed"]))
@@ -709,7 +709,7 @@ def cmd_build(a):
     finally:
         shutil.rmtree(ws / "build/dev-keys", ignore_errors=True)
         chown(ws)  # rs leaves root-owned logs and installer files outside out/
-    print(f"cib: artifacts in {out}")
+    print(f"pib: artifacts in {out}")
 
 
 def unsign(swu):
@@ -718,7 +718,7 @@ def unsign(swu):
         names = [n for n in read_swu(swu, t) if n != "sw-description.sig"]
         write_swu(names, t, swu.with_name(swu.name[:-4] + ".unsigned.swu"))
     swu.unlink()
-    print(f"cib: {swu.name[:-4]}.unsigned.swu is unsigned; run cib sign")
+    print(f"pib: {swu.name[:-4]}.unsigned.swu is unsigned; run pib sign")
 
 
 def write_sums(out):
@@ -730,7 +730,7 @@ def write_sums(out):
 def cmd_verify_debs(a):
     ws = Path.cwd()
     debs = check_debs(ws, load_config(ws))
-    print(f"cib: {len(debs)} custom .debs verified")
+    print(f"pib: {len(debs)} custom .debs verified")
 
 
 # ---- .swu -------------------------------------------------------------------
@@ -816,7 +816,7 @@ def read_swu(swu, dest):
     if not names or names[0] != "sw-description":
         die(f"{swu} is not a .swu: sw-description must be the first member")
     for n in names:
-        # cib sign re-packs by name: a path would pull in the signer's own files
+        # pib sign re-packs by name: a path would pull in the signer's own files
         if "/" in n or n in ("", ".", "..") or names.count(n) > 1:
             die(f"{swu}: member name {n!r} is not a plain, unique file name")
     cpio("-idm", "--no-absolute-filenames")
@@ -858,10 +858,10 @@ def cmd_sign(a):
     with tempfile.TemporaryDirectory() as t:
         d = Path(t)
         if a.dev:
-            gen_keys(d / "keys", cn="CIB dev")
+            gen_keys(d / "keys", cn="PIB dev")
             cert, key, pkcs11 = (d / "keys/swu-signing.crt",
                                  d / "keys/swu-signing.key", None)
-            print("cib: WARNING: --dev signs with a throwaway key; the board "
+            print("pib: WARNING: --dev signs with a throwaway key; the board "
                   "will not trust it", file=sys.stderr)
         else:
             s = ws_yaml().get("signing") or {}
@@ -875,7 +875,7 @@ def cmd_sign(a):
             if ca.is_file() or s.get("ca"):  # check_issued dies when a named CA is missing
                 check_issued(cert, ca)
             else:
-                print(f"cib: warning: {ca} not found; not checking that the "
+                print(f"pib: warning: {ca} not found; not checking that the "
                       "leaf is issued by your CA", file=sys.stderr)
         names = [n for n in read_swu(swu, d) if n != "sw-description.sig"]
         desc = (d / "sw-description").read_text()
@@ -906,7 +906,7 @@ def cmd_sign(a):
     if sums.is_file():
         write_sums(out.parent)
     chown(out, *([sums] if sums.is_file() else []))
-    print(f"cib: signed {out}")
+    print(f"pib: signed {out}")
 
 
 def strip_comments(text):
@@ -1001,12 +1001,12 @@ def cmd_verify(a):
                 m = json.loads(Path(a.manifest).read_text())
                 want, mver = m["boot0"]["sha256"], m["version"]
             except (OSError, ValueError, KeyError, TypeError) as ex:
-                die(f"{a.manifest} is not a cib manifest: {ex}")
+                die(f"{a.manifest} is not a pib manifest: {ex}")
             if mver != ver[1]:
                 die(f"the manifest describes version {mver}, the bundle is {ver[1]}")
             if not (d / "boot0.be").is_file() or sha256(d / "boot0.be") != want:
                 die("boot0.be does not match the manifest")
-    print(f"cib: {a.swu} OK ({len(arts)} artifacts verified)")
+    print(f"pib: {a.swu} OK ({len(arts)} artifacts verified)")
 
 
 # ---- kernel FIT signature (securepalette) -----------------------------------
@@ -1292,17 +1292,17 @@ def cmd_clean(a):
                            capture_output=True, text=True) if parts else None
         vgs = sorted(set(r.stdout.split())) if r else []
         if not a.yes:
-            print(f"cib: would deactivate {' '.join(vgs) or 'no volume group'} "
+            print(f"pib: would deactivate {' '.join(vgs) or 'no volume group'} "
                   f"and detach {dev}")
             continue
         for vg in vgs:
             run(["vgchange", "-an", vg])
         run(["losetup", "-d", dev])
-        print(f"cib: detached {dev}")
+        print(f"pib: detached {dev}")
     if todo and not a.yes:
-        print("cib: run 'cib clean --yes' to do this (stop running builds first)")
+        print("pib: run 'pib clean --yes' to do this (stop running builds first)")
     elif not todo:
-        print("cib: nothing to clean")
+        print("pib: nothing to clean")
 
 
 # ---- diff -------------------------------------------------------------------
@@ -1335,7 +1335,7 @@ def cmd_diff(a):
 # ---- entry ------------------------------------------------------------------
 
 def parser():
-    p = argparse.ArgumentParser(prog="cib", description=__doc__)
+    p = argparse.ArgumentParser(prog="pib", description=__doc__)
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1345,12 +1345,12 @@ def parser():
     s.add_argument("--flavor", default="palette",
                    choices=["minimal", "palette", "securepalette"])
     s.add_argument("--release")
-    s.add_argument("--configs", help="reference configs dir (or CIB_CONFIGS); default: the configs shipped in the container")
+    s.add_argument("--configs", help="reference configs dir (or PIB_CONFIGS); default: the configs shipped in the container")
     s.set_defaults(fn=cmd_init)
 
     keys = sub.add_parser("keys", help="signing keys").add_subparsers(
         dest="sub", required=True)
-    s = keys.add_parser("payload", help="create the AES key for cib sign --encrypt")
+    s = keys.add_parser("payload", help="create the AES key for pib sign --encrypt")
     s.add_argument("--out", default="keys")
     s.set_defaults(fn=cmd_keys_payload)
     for name, fn, text in (
