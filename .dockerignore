@@ -1,5 +1,7 @@
 *
 !entrypoint.sh
+!RELEASE
+!CODENAME
 !files/
 !dist/*.whl
 !dist/*.txt

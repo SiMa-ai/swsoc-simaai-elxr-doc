@@ -18,7 +18,6 @@
 #     index date, read when the image was built), for reproducible file times
 #
 # Inputs (environment):
-#   PIB_CODENAME     - suite the repo publishes (set by the Dockerfile)
 #   SWU_SIGNING_KEY,
 #   SWU_SIGNING_CERT - used by "pib sign" only; "pib build" never needs them
 set -eo pipefail
@@ -30,6 +29,7 @@ case "${1:-} ${2:-}" in
 esac
 
 DEBS=/workspace/custom-debs
+CODENAME="$(< /etc/pib-codename)"  # the suite the local repo publishes
 REPO_DIR=/var/www/html/deb/custom
 KEY_UID="PIB local repo <pib-local-repo@localhost>"
 
@@ -91,9 +91,9 @@ for deb in "${debs[@]}"; do
     defaults=()
     [ -n "$sec" ] || defaults+=(-S misc)
     [ -n "$pri" ] || defaults+=(-P optional)
-    reprepro -b "$REPO_DIR" --export=silent-never -C non-free "${defaults[@]}" includedeb "$PIB_CODENAME" "$deb"
+    reprepro -b "$REPO_DIR" --export=silent-never -C non-free "${defaults[@]}" includedeb "$CODENAME" "$deb"
 done
-reprepro -b "$REPO_DIR" export "$PIB_CODENAME"
+reprepro -b "$REPO_DIR" export "$CODENAME"
 # The signing key is not needed past this point: stop the agent and drop the key.
 gpgconf --kill all 2>/dev/null || true
 rm -rf "$GNUPGHOME"

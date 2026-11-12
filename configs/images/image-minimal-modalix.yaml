@@ -3,8 +3,8 @@ platform: modalix
 flavor: minimal
 name: elxr-${flavor}-${platform}
 description: "SiMa.ai eLxr ${flavor} image for ${platform}."
-version: 3.0.0
-codename: agate
+version: ${include:/etc/pib-release}
+codename: ${include:/etc/pib-codename}
 architecture: arm64
 schemaVersion: 1
 params: "${package:image-params.yaml,

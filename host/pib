@@ -9,7 +9,13 @@
 # devices and LVM.
 set -euo pipefail
 
-IMAGE="${PIB_IMAGE:-sima-image-builder:${SIMA_RELEASE:-3.0.0}}"
+# Default tag: the release in RELEASE, next to host/ in the checkout.
+if [ -z "${PIB_IMAGE:-}" ] && [ -z "${SIMA_RELEASE:-}" ]; then
+    rel="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/RELEASE"
+    [ -f "$rel" ] || { echo "pib: $rel not found: set SIMA_RELEASE or PIB_IMAGE" >&2; exit 1; }
+    SIMA_RELEASE="$(< "$rel")"
+fi
+IMAGE="${PIB_IMAGE:-sima-image-builder:${SIMA_RELEASE}}"
 tty=()
 [ -t 0 ] && [ -t 1 ] && tty=(-t)
 

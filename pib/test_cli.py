@@ -110,6 +110,14 @@ with tempfile.TemporaryDirectory() as t:
         assert "image.yaml release 3.0.0 != container release 3.1.0" in dies(c.load_config, t / "ws4")
     finally:
         os.environ.pop("SIMA_RELEASE")
+    # in the container /etc/pib-release is the release, even when SIMA_RELEASE is unset or says otherwise
+    c.RELEASE_FILE = t / "pib-release"; c.RELEASE_FILE.write_text("3.1.0\n")
+    try:
+        assert "image.yaml release 3.0.0 != container release 3.1.0" in dies(c.load_config, t / "ws4")
+        os.environ["SIMA_RELEASE"] = "3.0.0"
+        assert "image.yaml release 3.0.0 != container release 3.1.0" in dies(c.load_config, t / "ws4")
+    finally:
+        os.environ.pop("SIMA_RELEASE"); c.RELEASE_FILE = Path("/etc/pib-release")
     assert (t / "ws2/.gitignore").read_text() == "mine\n", "existing .gitignore kept"
     assert "reference config" in dies(c.cmd_init, argparse.Namespace(
         dir=str(t / "ws3"), flavor="palette", target="modalix", release="3.0.0", configs=str(cfgdir)))
@@ -605,12 +613,36 @@ with tempfile.TemporaryDirectory() as t:
     args = r.stdout.split("\n")
     assert f"{t}/keys/cred.txt:/keys/PIB_CREDENTIALS:ro" in args and "PIB_CREDENTIALS=/keys/PIB_CREDENTIALS" in args, args
     assert "secret" not in r.stdout and not any(a.startswith(f"{t}/keys:") for a in args), "only the file is mounted"
-    for env, tag in (({}, "sima-image-builder:3.0.0"), ({"SIMA_RELEASE": "3.1.0"}, "sima-image-builder:3.1.0"),
-                     ({"SIMA_RELEASE": "3.1.0", "PIB_IMAGE": "reg/x:7"}, "reg/x:7")):
-        e = {k: v for k, v in os.environ.items() if k not in ("SIMA_RELEASE", "PIB_IMAGE", "PIB_CREDENTIALS")}
-        r = subprocess.run([str(ROOT / "host/pib"), "verify"], cwd=t, capture_output=True, text=True,
+    # RELEASE is the one place the release is set: one <major>.<minor>.<patch> line, matching the checked-in wheel
+    rel = (ROOT / "RELEASE").read_text()
+    assert re.fullmatch(r"\d+\.\d+\.\d+\n", rel), rel
+    rel = rel.strip()
+    # CODENAME is the one place the eLxr suite is set; the image configs include both files
+    assert re.fullmatch(r"[a-z][a-z0-9]*\n", (ROOT / "CODENAME").read_text())
+    for f in sorted((ROOT / "configs/images").glob("image-*-modalix.yaml")):
+        head = f.read_text().splitlines()[5:7]
+        assert head == ["version: ${include:/etc/pib-release}", "codename: ${include:/etc/pib-codename}"], (f, head)
+    assert "ARG CODENAME" not in (ROOT / "Dockerfile.pib").read_text(), "the suite is set only in CODENAME"
+    other = rel + "9"  # any release but RELEASE's: the env must win over the file
+    assert [p.name for p in (ROOT / "dist").glob("pasha-*.whl")] == [f"pasha-{rel}-py3-none-any.whl"]
+    (t / "copy").mkdir(); shutil.copy(ROOT / "host/pib", t / "copy/pib"); (t / "host").symlink_to(ROOT / "host")
+    (t / "own/host").mkdir(parents=True); shutil.copy(ROOT / "host/pib", t / "own/host/pib")
+    (t / "own/RELEASE").write_text(other + "\n")
+    e = {k: v for k, v in os.environ.items() if k not in ("SIMA_RELEASE", "PIB_IMAGE", "PIB_CREDENTIALS")}
+    for shim, env, tag in ((ROOT / "host/pib", {}, f"sima-image-builder:{rel}"),
+                           (t / "host/pib", {}, f"sima-image-builder:{rel}"),  # through a symlink
+                           (t / "own/host/pib", {}, f"sima-image-builder:{other}"),  # the file's value, not a built-in one
+                           (ROOT / "host/pib", {"SIMA_RELEASE": other}, f"sima-image-builder:{other}"),
+                           (ROOT / "host/pib", {"SIMA_RELEASE": other, "PIB_IMAGE": "reg/x:7"}, "reg/x:7"),
+                           (t / "copy/pib", {"SIMA_RELEASE": other}, f"sima-image-builder:{other}"),
+                           (t / "copy/pib", {"PIB_IMAGE": "reg/x:7"}, "reg/x:7")):
+        r = subprocess.run([str(shim), "verify"], cwd=t, capture_output=True, text=True,
                            env={**e, **env, "PATH": f"{t}/bin:{os.environ['PATH']}"})
-        assert r.stdout.split("\n")[-4:-1] == [tag, "pib", "verify"], (env, r.stdout)
+        assert r.stdout.split("\n")[-4:-1] == [tag, "pib", "verify"], (shim, env, r.stdout, r.stderr)
+    # a shim copied out of the checkout has no RELEASE next to it and says so instead of guessing
+    r = subprocess.run([str(t / "copy/pib"), "verify"], cwd=t, capture_output=True, text=True,
+                       env={**e, "PATH": f"{t}/bin:{os.environ['PATH']}"})
+    assert r.returncode == 1 and r.stdout == "" and f"pib: {t}/RELEASE not found: set SIMA_RELEASE or PIB_IMAGE" in r.stderr, r
     for missing in (t / "keys/none", t / "keys"):
         r = subprocess.run([str(ROOT / "host/pib"), "sign"], cwd=t, capture_output=True, text=True,
                            env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "SWU_SIGNING_KEY": str(missing)})
@@ -763,7 +795,7 @@ with tempfile.TemporaryDirectory() as d:
 with tempfile.TemporaryDirectory() as d:
     os.environ["PIB_REPO_DIR"] = d; os.environ.pop("PIB_CODENAME", None)
     try:
-        assert "PIB_CODENAME is not set" in dies(c.check_repo, [])
+        assert "/etc/pib-codename is missing" in dies(c.check_repo, [])
         os.environ["PIB_CODENAME"] = "agate"
         assert dies(c.check_repo, []) == f"pib: local repo {d}/dists/agate is not published; start via the entrypoint"
         dist = Path(d) / "dists/agate"; (dist / "non-free/binary-arm64").mkdir(parents=True); (dist / "Release").write_text("r")
@@ -774,6 +806,27 @@ with tempfile.TemporaryDirectory() as d:
         assert "x 2 is missing" in dies(c.check_repo, [("x", "2")]), "other version"
     finally:
         os.environ.pop("PIB_REPO_DIR"); os.environ.pop("PIB_CODENAME", None)
+# container_codename() and sima_release_line(): /etc/pib-codename wins over PIB_CODENAME; sima_source wins over both
+with tempfile.TemporaryDirectory() as d:
+    saved = {k: os.environ.pop(k, None) for k in ("PIB_CODENAME", "PIB_SIMA_APT_URL", "MIRROR_1")}
+    try:
+        assert c.container_codename() is None
+        assert "PIB_SIMA_APT_URL or /etc/pib-codename is missing" in dies(c.sima_release_line, {})
+        assert c.sima_release_line({"sima_source": "deb http://m.example/x s non-free"}) == "deb http://m.example/x s non-free"
+        os.environ.update(PIB_CODENAME="envsuite", PIB_SIMA_APT_URL="https://r.example/rel")
+        assert c.sima_release_line({}) == "deb [signed-by=/usr/share/keyrings/simaai-public.gpg] https://r.example/rel envsuite non-free"
+        assert c.sima_release_line({"sima_source": ""}) == c.sima_release_line({}), "empty sima_source is unset"
+        c.CODENAME_FILE = Path(d) / "pib-codename"; c.CODENAME_FILE.write_text("filesuite\n")
+        assert c.container_codename() == "filesuite"
+        assert c.sima_release_line({}).endswith(" https://r.example/rel filesuite non-free")
+        os.environ["MIRROR_1"] = "deb http://ignored/ x non-free"
+        assert c.sima_release_line({}).endswith(" filesuite non-free"), "MIRROR_1 in pib's own env is not read"
+        assert c.sima_release_line({"sima_source": "deb http://m.example/x s non-free"}) == "deb http://m.example/x s non-free"
+    finally:
+        c.CODENAME_FILE = Path("/etc/pib-codename")
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None: os.environ[k] = v
 # cmd_clean: this workspace's elxr-*-<target>-*.img by inode, deleted backing files too; --yes deactivates and detaches
 with tempfile.TemporaryDirectory() as d:
     calls = []
@@ -850,7 +903,7 @@ with tempfile.TemporaryDirectory() as d:
     with contextlib.redirect_stdout(io.StringIO()):
         c.cmd_keys_renew(argparse.Namespace(out=str(k), algo="ec", cn="T"))
     assert (k / "swu-signing.crt").read_bytes() != old; c.check_issued(k / "swu-signing.crt", k / "ca.crt")
-# release_boot0_md5: only MIRROR_1, the version asked for, the md5 from the package's md5sums
+# release_boot0_md5: only the line sima_release_line() gives, the version asked for, the md5 from the package's md5sums
 calls, lists = [], []
 def fake_run(cmd, cwd=None, **k):
     calls.append(cmd)
@@ -862,22 +915,21 @@ def fake_run(cmd, cwd=None, **k):
         return MD5SUMS
     return ""
 real = c.run
-os.environ.pop("MIRROR_1", None)
-assert dies(c.release_boot0_md5, "troot-modalix", {}) == "pib: no SiMa release apt line (MIRROR_1) to check boot0.be against"
-os.environ["MIRROR_1"] = "deb http://repo.sima.ai x non-free"
+assert dies(c.release_boot0_md5, "troot-modalix", {}) == "pib: PIB_SIMA_APT_URL or /etc/pib-codename is missing; run inside the PIB container"
+os.environ.update(PIB_SIMA_APT_URL="https://r.example/rel", PIB_CODENAME="agate")
 try:
     c.run = fake_run
     MD5SUMS = "aa  boot/Release/boot0.bex\nbb  boot/Release/boot0.be\ncc  boot/other\n"
     assert c.release_boot0_md5("troot-modalix=3.0.0", {}) == "bb"
     assert calls[1][-2:] == ["download", "troot-modalix=3.0.0"] and "-oDir::Etc::sourceparts=/dev/null" in calls[0], calls
+    assert lists == ["deb [signed-by=/usr/share/keyrings/simaai-public.gpg] https://r.example/rel agate non-free\n"], lists
+    assert c.release_boot0_md5("troot-modalix", {"sima_source": "deb http://m.example/sima agate non-free"}) == "bb"
+    assert lists[1] == "deb http://m.example/sima agate non-free\n", lists
     MD5SUMS = "aa  boot/other\n"
     assert dies(c.release_boot0_md5, "troot-modalix", {}) == "pib: troot-modalix md5sums has no boot/Release/boot0.be"
-    os.environ.pop("MIRROR_1"); MD5SUMS = "bb  boot/Release/boot0.be\n"
-    assert c.release_boot0_md5("troot-modalix", {"sima_source": "deb http://m.example/sima agate non-free"}) == "bb"
-    assert lists[0] == "deb http://repo.sima.ai x non-free\n" and lists[-1] == "deb http://m.example/sima agate non-free\n", lists
 finally:
     c.run = real
-    os.environ.pop("MIRROR_1", None)
+    os.environ.pop("PIB_SIMA_APT_URL"); os.environ.pop("PIB_CODENAME")
 # cmd_build: a boot0.be check that fails, or cannot run, leaves no out/<stem>* behind
 with tempfile.TemporaryDirectory() as t:
     ws = Path(t); here = os.getcwd(); os.chdir(ws)
@@ -896,6 +948,7 @@ with tempfile.TemporaryDirectory() as t:
         (ws / "build/packages.json").write_text(json.dumps([{"name": "troot-modalix", "version": "3", "origin": "sima"}]))
         return subprocess.CompletedProcess(cmd, 0)
     (ws / "out").mkdir(); (out / "elxr-palette-modalix-3.0.0.1-agate-arm64.swu").write_text("other image")
+    os.environ.update(PIB_SIMA_APT_URL="https://r.example/rel", PIB_CODENAME="agate")
     try:
         for k, v in stubs.items(): setattr(c, k, v)
         c.subprocess.run = fake_rs
@@ -915,12 +968,14 @@ with tempfile.TemporaryDirectory() as t:
         def fake_ok(cmd, *a, **k):
             if cmd[:2] != ["rs", "build"]:
                 return real_sp(cmd, *a, **k)
+            assert k["env"]["MIRROR_1"] == want_m1, k["env"].get("MIRROR_1")
             b = ws / "b"; b.mkdir(exist_ok=True)
             for n in ("sw-description", "sw-description.sig", "boot0.be"): (b / n).write_text(n)
             c.write_swu(["sw-description", "sw-description.sig", "boot0.be"], b, out / "elxr-minimal-modalix-3.0.0.1-agate-arm64.swu")
             (out / "elxr-minimal-modalix-3.0.0.1-agate-arm64-boot0.be").write_text("b0")
             return subprocess.CompletedProcess(cmd, 0)
         c.subprocess.run = fake_ok
+        want_m1 = "deb [signed-by=/usr/share/keyrings/simaai-public.gpg] https://r.example/rel agate non-free"
         c.release_boot0_md5 = lambda spec, cfg: hashlib.md5(b"b0").hexdigest()
         with contextlib.redirect_stdout(io.StringIO()) as o:
             c.cmd_build(argparse.Namespace(supplier=None, dev=False))
@@ -932,9 +987,17 @@ with tempfile.TemporaryDirectory() as t:
         m = json.loads((out / (S + ".manifest.json")).read_text())
         assert m["version"] == "3.0.0.1" and m["supplier"] == "SiMa.ai" and m["boot0"]["sha256"] == c.sha256(out / (S + "-boot0.be"))
         assert len((out / "SHA256SUMS").read_text().splitlines()) == 4 and o.getvalue().endswith(f"pib: artifacts in {out}\n")
+        # sima_source: rs installs from it and the boot0.be check reads the same line
+        cfg["sima_source"] = want_m1 = "deb [signed-by=/usr/share/keyrings/simaai-public.gpg] http://m.example/sima agate non-free"
+        checked = []
+        c.release_boot0_md5 = lambda spec, cfg: checked.append(c.sima_release_line(cfg)) or hashlib.md5(b"b0").hexdigest()
+        with contextlib.redirect_stdout(io.StringIO()):
+            c.cmd_build(argparse.Namespace(supplier=None, dev=False))
+        assert checked == [want_m1], checked
     finally:
         c.subprocess.run = real_sp
         for k, v in saved.items(): setattr(c, k, v)
+        os.environ.pop("PIB_SIMA_APT_URL"); os.environ.pop("PIB_CODENAME")
         os.chdir(here)
 # --help lists the public commands only
 h = c.parser().format_help()

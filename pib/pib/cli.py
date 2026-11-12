@@ -23,6 +23,8 @@ from pib import __version__
 
 DEBS = "custom-debs"
 BAKED_CONFIGS = Path("/usr/share/pib/configs")  # the image configs shipped in the container
+RELEASE_FILE = Path("/etc/pib-release")  # the release this container builds (from RELEASE)
+CODENAME_FILE = Path("/etc/pib-codename")  # its eLxr suite (from CODENAME)
 VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)")  # use fullmatch
 # image.yaml fields and the type each must have (release/version/slots may be numbers).
 FIELDS = {"base": str, "target": str, "release": (str, int, float), "version": (str, int, float),
@@ -284,6 +286,26 @@ def cmd_keys_renew(a):
 
 # ---- workspace --------------------------------------------------------------
 
+def container_release():
+    """The container's release; SIMA_RELEASE stands in for it outside the container."""
+    return RELEASE_FILE.read_text().strip() if RELEASE_FILE.exists() else os.environ.get("SIMA_RELEASE")
+
+
+def container_codename():
+    """The container's eLxr suite; PIB_CODENAME stands in for it outside the container."""
+    return CODENAME_FILE.read_text().strip() if CODENAME_FILE.exists() else os.environ.get("PIB_CODENAME")
+
+
+def sima_release_line(cfg):
+    """The SiMa.ai apt line: image.yaml sima_source, else this container's release repo and suite."""
+    if cfg.get("sima_source"):
+        return str(cfg["sima_source"])
+    url, codename = os.environ.get("PIB_SIMA_APT_URL"), container_codename()
+    if not (url and codename):
+        die("PIB_SIMA_APT_URL or /etc/pib-codename is missing; run inside the PIB container")
+    return f"deb [signed-by=/usr/share/keyrings/simaai-public.gpg] {url} {codename} non-free"
+
+
 def cmd_init(a):
     ws = Path(a.dir)
     if (ws / "image.yaml").exists():
@@ -293,7 +315,7 @@ def cmd_init(a):
     ref = configs / "images" / f"image-{a.flavor}-{a.target}.yaml"
     if not ref.is_file():
         die(f"reference config {ref} not found (see --configs)")
-    release = a.release or os.environ.get("SIMA_RELEASE")
+    release = a.release or container_release()
     if not release:
         die("--release or SIMA_RELEASE is required")
     if not re.fullmatch(r"\d+\.\d+\.\d+", release):
@@ -357,7 +379,7 @@ def load_config(ws):
             any(int(x) > 65535 for x in m.groups()) or int(m[4]) < 1:
         die(f"version {cfg['version']} must be {cfg['release']}.<build>, "
             "numeric, with build 1..65535")
-    env = os.environ.get("SIMA_RELEASE")
+    env = container_release()
     if env and env != cfg["release"]:
         die(f"image.yaml release {cfg['release']} != container release {env}")
     return cfg
@@ -425,9 +447,9 @@ def check_debs(ws, cfg):
 def check_repo(debs):
     """Every custom .deb must be in the signed local repo the entrypoint built."""
     repo = Path(os.environ.get("PIB_REPO_DIR", "/var/www/html/deb/custom"))
-    codename = os.environ.get("PIB_CODENAME")
+    codename = container_codename()
     if not codename:
-        die("PIB_CODENAME is not set; run inside the PIB container")
+        die("/etc/pib-codename is missing; run inside the PIB container")
     dist = repo / "dists" / codename
     if not (dist / "Release").is_file():
         die(f"local repo {dist} is not published; start via the entrypoint")
@@ -685,8 +707,7 @@ def cmd_build(a):
         out.mkdir(exist_ok=True)
         env = dict(os.environ, CURRENT_DIR=str(ws), OUTPUT_DIR=str(out),
                    ROOTFS_SLOTS=slots, SWU_SIGNING_KEY=str(key), SWU_SIGNING_CERT=str(cert))
-        if cfg.get("sima_source"):
-            env["MIRROR_1"] = str(cfg["sima_source"])
+        env["MIRROR_1"] = sima_release_line(cfg)
         log = ws / "configs/images/mmdebstrap.log"  # a pib _finish refusal ends up there
         log.unlink(missing_ok=True)
         r = subprocess.run(["rs", "build", "--config",
@@ -752,11 +773,8 @@ def discard(out, stem):
 
 def release_boot0_md5(spec, cfg):
     """md5 of boot/Release/boot0.be in a tRoot package (spec: name or name=version) of the
-    SiMa.ai apt line the image installs from (sima_source, else MIRROR_1; nothing else),
-    read from the package's own md5sums."""
-    line = cfg.get("sima_source") or os.environ.get("MIRROR_1")
-    if not line:
-        die("no SiMa release apt line (MIRROR_1) to check boot0.be against")
+    SiMa.ai apt line the image installs from (nothing else), read from the package's own md5sums."""
+    line = sima_release_line(cfg)
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / "lists/partial").mkdir(parents=True)

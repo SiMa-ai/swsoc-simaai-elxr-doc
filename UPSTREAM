@@ -1,5 +1,5 @@
 Vendored from SiMa.ai image configs (per eLxr release):
-  SiMa.ai 3.0.0 image configs: configs/images (minimal, palette, securepalette; version and codename written in place), two scripts
+  SiMa.ai 3.0.0 image configs: configs/images (minimal, palette, securepalette; version and codename included from /etc/pib-release and /etc/pib-codename), two scripts
 elxr-config is not vendored: the Dockerfile fetches commit 0458b89 from
 https://gitlab.com/elxr/tools/elxr-config and checks its sha256.
 Changed from upstream:

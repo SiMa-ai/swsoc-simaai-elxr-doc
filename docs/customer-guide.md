@@ -94,13 +94,13 @@ board against its own root user.
 
 ## Version rule
 
-The version is `<SiMa.ai release>.<your build>`, all numeric: `3.0.0.4`. Your build is
+The version is `<SiMa.ai release>.<your build>`, all numeric: `<release>.4`. Your build is
 1 to 65535. Each image refuses to install a bundle older than itself (its
 `no-downgrading` setting is its own version), and an equal version installs.
 
 It must be numeric because the board's `swupdate` compares versions as semantic versions
-only when they are digits and dots; `3.0.0-pib.1` sorts as older than `3.0.0`, so a
-board running `3.0.0` would refuse it. `pib build` rejects anything else.
+only when they are digits and dots; `<release>-pib.1` sorts as older than `<release>`, so a
+board running `<release>` would refuse it. `pib build` rejects anything else.
 
 ## Installing and rollback
 
@@ -199,7 +199,7 @@ changed, and any board after `SWUPDATE_CLEAN_OVERLAY=1`; without `PIB_CREDENTIAL
 such a board needs an SSH key in `overlay/`.
 
 The update script (`configs/images/files/update_modalix.sh`) has four known limitations
-in release 3.0.0:
+in release `<release>`:
 
 - It reads its control files (`swupdate.clean-overlay`, `swupdate.auto-reboot`,
   `swupdate.clean-uboot-env`, `swupdate.keep-ddr-train`) from world-writable `/tmp`, and

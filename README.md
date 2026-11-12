@@ -12,18 +12,20 @@ SiMa.ai SDK manual:
 | Path | What it is |
 |---|---|
 | `Dockerfile.pib`, `entrypoint.sh`, `files/` | The container (eLxr base, rucksack, a local signed apt repo for `custom-debs/`) |
+| `RELEASE` | The SiMa.ai release this checkout builds (written with the pasha wheel for each release) |
+| `CODENAME` | The eLxr suite of that release (written with `RELEASE`) |
 | `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release) |
 | `pib/` | The `pib` Python package and its `pyproject.toml` |
 | `host/pib` | Host shim: runs the container with the current directory as the workspace |
 | `configs/images/` | Image configs for each flavor (`image-{minimal,palette,securepalette}-modalix.yaml`), with the stage list, params, hooks, overlay and SWU files they use |
 | `scripts/` | The two build helper scripts the stages call |
-| `UPSTREAM` | What the configs were taken from (the SiMa.ai 3.0.0 image configs, the eLxr config tool commit) and how they differ |
+| `UPSTREAM` | What the configs were taken from (the SiMa.ai `<release>` image configs, the eLxr config tool commit) and how they differ |
 | `sdk-manual.rst`, `images/`, `Dockerfile.modalix` | The SiMa.ai SDK manual, its figures, and the SDK container it describes (not part of PIB) |
 
 The `minimal` and `palette` flavors have been built end to end; `securepalette` has not,
 and no fused (secure-boot) board has been tested. A build needs network access to the
 package repositories. A `securepalette` build checks the kernel FIT signature against
-the keys in the image's U-Boot. The 3.0.0 packages are signed with the development key
+the keys in the image's U-Boot. The `<release>` packages are signed with the development key
 `dev`, so with them `securepalette` builds only with `--dev`, and a `--dev` bundle cannot
 be signed for shipping: a shippable `securepalette` needs kernel, U-Boot and ATF packages
 signed with a production key.
@@ -53,7 +55,7 @@ SiMa.ai packs and checks in for each release; the Dockerfile stops with that mes
 when the wheel is missing.
 
 ```bash
-docker build -f Dockerfile.pib -t sima-image-builder:3.0.0 .
+docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
 ```
 
 The Dockerfile needs BuildKit, the default builder since Docker Engine 23.0 when the
@@ -64,7 +66,7 @@ a pinned commit and checks its sha256, so it needs access to gitlab.com.
 
 Put `host/pib` on your `PATH`. It needs Docker, runs the container with
 `--privileged -v /dev:/dev` (loop devices, LVM) and mounts the current
-directory at `/workspace`. `PIB_IMAGE` or `SIMA_RELEASE` choose another image tag.
+directory at `/workspace`. It runs the tag for the release in `RELEASE`; `PIB_IMAGE` or `SIMA_RELEASE` choose another.
 `SWU_SIGNING_KEY` (a file or a `pkcs11:` URI) and `SWU_SIGNING_CERT` (a PEM file)
 are passed to `pib sign`; `PIB_CREDENTIALS` (an optional file) is used by `pib build`. Each file is
 mounted alone, read-only.
@@ -75,7 +77,7 @@ mounted alone, read-only.
    and the workspace gets a copy of `configs/` and the files the hooks use:
 
    ```bash
-   pib init my-image --flavor minimal --release 3.0.0
+   pib init my-image --flavor minimal
    cd my-image
    ```
 
@@ -164,7 +166,7 @@ mounted alone, read-only.
 | Key | Meaning |
 |---|---|
 | `base`, `target`, `release` | Flavor (`minimal`, `palette`, `securepalette`), platform, SiMa.ai release. `release` must match the container's release. |
-| `version` | `<release>.<build>`, all numeric, build 1..65535 (for example `3.0.0.4`). Boards refuse older versions. |
+| `version` | `<release>.<build>`, all numeric, build 1..65535 (for example `<release>.4`). Boards refuse older versions. |
 | `slots` | `ab` (default: `rootfs.A` and `rootfs.B`) or `a` (single slot). |
 | `packages.add`, `packages.remove` | Packages added to or removed from the flavor's list. |
 | `overlay` | A directory inside the workspace, copied over `/` after SiMa.ai's overlays with every file owned by root. |
