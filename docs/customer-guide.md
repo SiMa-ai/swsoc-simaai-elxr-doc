@@ -16,7 +16,7 @@ this guide covers what you need to know around them.
   Docker's storage location
   needs that space too. Keep 10 GB free for minimal and 20 GB for palette.
 - To build the container yourself: a PIB checkout (it carries the pasha wheel SiMa.ai
-  packs for the release) and access to gitlab.com. The image configs ship in
+  packs for the release). The image configs ship in
   it and in the container.
 
 ## Workflow

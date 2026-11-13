@@ -12,7 +12,8 @@
 #
 # Build context is this directory. dist/ holds the SiMa.ai pasha wheel
 # (pasha-<release>-py3-none-any.whl, the rucksack image-build modules) and
-# RELEASE the release it is for, both checked in by SiMa.ai for each release:
+# RELEASE the release it is for, both checked in by SiMa.ai for each release,
+# and eLxr's elxr-config archive (see UPSTREAM):
 #
 #   docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
 #
@@ -139,16 +140,14 @@ COPY files/distributions /var/www/html/deb/custom/conf/distributions
 RUN sed -i "s/@CODENAME@/$(cat /etc/pib-codename)/" /var/www/html/deb/custom/conf/distributions
 COPY files/nginx.conf /etc/nginx/sites-enabled/default
 
-# elxr-config (manifests and overlay the configs link to) is public on GitLab:
-# fetched at a pinned commit and checked, minus the Orin boot images.
-ARG ELXR_CONFIG_COMMIT=0458b89f28d2ecd4c4d5ea5ec20985ce070b4dab
-ARG ELXR_CONFIG_SHA256=4a4057a1472ccfa361fa17bddb7a5a5f387dafcd4658efd90cbaee846686631f
-RUN wget -q -O /tmp/elxr-config.tar.gz \
-        "https://gitlab.com/elxr/tools/elxr-config/-/archive/${ELXR_CONFIG_COMMIT}/elxr-config-${ELXR_CONFIG_COMMIT}.tar.gz" && \
-    echo "${ELXR_CONFIG_SHA256}  /tmp/elxr-config.tar.gz" | sha256sum -c - && \
+# elxr-config 1.1.0+elxr14 (commit 75cce348412fb4e75e917ba424fcd1e057c8cdc7): GitLab's archive,
+# checked in to dist/ and checked; the configs link to it. Orin boot images are left out.
+ARG ELXR_CONFIG_SHA256=9cfd9cfb62f809b9a4293fe6352e2295ea1c3fdd3831d86ec6dbb3a68ff10d60
+RUN --mount=type=bind,source=dist,target=/tmp/dist \
+    T=/tmp/dist/elxr-config-1.1.0-elxr14.tar.gz && \
+    echo "${ELXR_CONFIG_SHA256}  $T" | sha256sum -c - && \
     mkdir -p /usr/share/pib/elxr-config && \
-    tar -xzf /tmp/elxr-config.tar.gz -C /usr/share/pib/elxr-config --strip-components=1 --exclude='esp.img' && \
-    rm /tmp/elxr-config.tar.gz
+    tar -xzf "$T" -C /usr/share/pib/elxr-config --strip-components=1 --exclude='esp.img'
 
 # pib CLI, next to pasha so it matches this image's modules; --no-deps as for pasha.
 # rw: setuptools builds in-tree, and those writes are discarded with the mount.

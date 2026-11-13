@@ -5,6 +5,7 @@
 !files/
 !dist/*.whl
 !dist/*.txt
+!dist/elxr-config-1.1.0-elxr14.tar.gz
 !pib/
 !configs/
 !scripts/

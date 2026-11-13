@@ -2,3 +2,4 @@
 !.gitignore
 !*.whl
 !debsbom-requirements.txt
+!elxr-config-1.1.0-elxr14.tar.gz

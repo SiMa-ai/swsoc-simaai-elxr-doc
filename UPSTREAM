@@ -1,7 +1,7 @@
 Vendored from SiMa.ai image configs (per eLxr release):
   SiMa.ai 3.0.0 image configs: configs/images (minimal, palette, securepalette; version and codename included from /etc/pib-release and /etc/pib-codename), two scripts
-elxr-config is not vendored: the Dockerfile fetches commit 0458b89 from
-https://gitlab.com/elxr/tools/elxr-config and checks its sha256.
+elxr-config is not vendored: dist/ holds GitLab's archive of commit 75cce34 (1.1.0+elxr14) of
+https://gitlab.com/elxr/tools/elxr-config, unchanged, and the Dockerfile checks its sha256.
 Changed from upstream:
 - Package sources: repo.sima.ai is the only SiMa.ai apt host (hooks/minimal.sh,
   hooks/base.sh, 98simaai-repository), and the SiMa.ai mirror in image-stages.yaml

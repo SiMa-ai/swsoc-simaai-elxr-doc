@@ -14,7 +14,7 @@ SiMa.ai SDK manual:
 | `Dockerfile.pib`, `entrypoint.sh`, `files/` | The container (eLxr base, rucksack, a local signed apt repo for `custom-debs/`) |
 | `RELEASE` | The SiMa.ai release this checkout builds (written with the pasha wheel for each release) |
 | `CODENAME` | The eLxr suite of that release (written with `RELEASE`) |
-| `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release) |
+| `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release), and the `elxr-config` archive it unpacks |
 | `pib/` | The `pib` Python package and its `pyproject.toml` |
 | `host/pib` | Host shim: runs the container with the current directory as the workspace |
 | `configs/images/` | Image configs for each flavor (`image-{minimal,palette,securepalette}-modalix.yaml`), with the stage list, params, hooks, overlay and SWU files they use |
@@ -61,8 +61,8 @@ docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
 The Dockerfile needs BuildKit, the default builder since Docker Engine 23.0 when the
 buildx plugin is installed. On older engines, set `DOCKER_BUILDKIT=1`.
 
-The build also downloads `elxr-config` (eLxr manifests and overlay) from GitLab at
-a pinned commit and checks its sha256, so it needs access to gitlab.com.
+The build also unpacks `elxr-config` (eLxr manifests and overlay): GitLab's archive of
+1.1.0+elxr14 (a pinned commit), checked in to `dist/` and checked by sha256.
 
 Put `host/pib` on your `PATH`. It needs Docker, runs the container with
 `--privileged -v /dev:/dev` (loop devices, LVM) and mounts the current
