@@ -647,6 +647,19 @@ with tempfile.TemporaryDirectory() as t:
         r = subprocess.run([str(ROOT / "host/pib"), "sign"], cwd=t, capture_output=True, text=True,
                            env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "SWU_SIGNING_KEY": str(missing)})
         assert r.returncode == 1 and r.stdout == "" and f"SWU_SIGNING_KEY: {missing} is not a file" in r.stderr, r
+    # each variable reaches only the command that reads it
+    KEY = "pkcs11:token=t;object=k"
+    for argv, env, passed in (
+            (["sign"], {"SWU_SIGNING_KEY": KEY, "PIB_CREDENTIALS": str(t / "keys/cred.txt")}, [f"SWU_SIGNING_KEY={KEY}"]),
+            (["build"], {"SWU_SIGNING_KEY": KEY, "SWU_SIGNING_CERT": str(t / "keys/cred.txt")}, []),
+            (["verify"], {"SWU_SIGNING_KEY": KEY, "PIB_CREDENTIALS": str(t / "keys/cred.txt")}, []),
+            (["--version"], {"SWU_SIGNING_KEY": KEY}, []),
+            ([], {"SWU_SIGNING_KEY": KEY}, [])):
+        r = subprocess.run([str(ROOT / "host/pib"), *argv], cwd=t, capture_output=True, text=True,
+                           env={**e, "PATH": f"{t}/bin:{os.environ['PATH']}", **env})
+        args = r.stdout.split("\n")
+        assert r.returncode == 0 and [a for a in args if a.startswith(("SWU_", "PIB_CREDENTIALS="))] == passed, (argv, env, args)
+        assert not any(a.startswith(f"{t}/keys/") for a in args), (argv, env, args)
 hook = (ROOT / "configs/images/hooks/base.sh").read_text()
 assert all(" chpasswd" not in ln or "chpasswd -e" in ln for ln in hook.splitlines()), "no password in the hook"
 snip = hook[hook.index("if [ -n \"${PIB_CREDENTIALS"):hook.index("chroot \"$1\" usermod -a -G sima root")].replace('"$1"', "/r")

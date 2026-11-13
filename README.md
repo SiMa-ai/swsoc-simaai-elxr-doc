@@ -68,8 +68,8 @@ Put `host/pib` on your `PATH`. It needs Docker, runs the container with
 `--privileged -v /dev:/dev` (loop devices, LVM) and mounts the current
 directory at `/workspace`. It runs the tag for the release in `RELEASE`; `PIB_IMAGE` or `SIMA_RELEASE` choose another.
 `SWU_SIGNING_KEY` (a file or a `pkcs11:` URI) and `SWU_SIGNING_CERT` (a PEM file)
-are passed to `pib sign`; `PIB_CREDENTIALS` (an optional file) is used by `pib build`. Each file is
-mounted alone, read-only.
+are used by `pib sign`; `PIB_CREDENTIALS` (an optional file) is used by `pib build`. Each file is
+mounted alone, read-only, and only into the command that reads it.
 
 ## Workflow
 

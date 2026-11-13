@@ -21,8 +21,14 @@ tty=()
 
 # Key files may live outside the workspace: mount each file alone read-only at
 # /keys/<variable> and point the container at it. PKCS#11 URIs pass through unchanged.
+# Only pib sign reads the signing pair and only pib build PIB_CREDENTIALS.
+case "${1:-}" in
+    sign)  vars=(SWU_SIGNING_KEY SWU_SIGNING_CERT) ;;
+    build) vars=(PIB_CREDENTIALS) ;;
+    *)     vars=() ;;
+esac
 keys=()
-for v in SWU_SIGNING_KEY SWU_SIGNING_CERT PIB_CREDENTIALS; do
+for v in ${vars[@]+"${vars[@]}"}; do
     f="${!v:-}"
     [ -n "$f" ] || continue
     case "$f" in
