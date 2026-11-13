@@ -147,9 +147,12 @@ mounted alone, read-only, and only into the command that reads it.
 
    `pib sign --pkcs11 <uri> --cert keys/swu-signing.crt` signs with a key held
    in an HSM or token through the OpenSSL PKCS#11 engine (tested with a SoftHSM
-   module added to the container). The host shim mounts no token: run the container
-   directly with the token's device or `pcscd` socket mounted, and set
-   `PKCS11_MODULE_PATH` if the engine does not find the module. Signing can run
+   module added to the container). For a smart card or USB token, the host needs `pcscd`
+   and a reader driver (`sudo apt install pcscd libccid`). Pass the URI with `--pkcs11` or as
+   `SWU_SIGNING_KEY='pkcs11:...'`: every `pib sign` mounts the host's `/run/pcscd` read-only
+   when `/run/pcscd/pcscd.comm` exists (set `PIB_PCSCD_DIR` to the directory of a socket kept
+   elsewhere). This path is untested with a real card or token. The engine finds OpenSC through
+   p11-kit; set `PKCS11_MODULE_PATH` for another module. Signing can run
    on any host that only has the bundle.
 
    `pib sign --encrypt` also encrypts `rootfs.ext4.gz` and `boot.vfat.gz` with

@@ -1,5 +1,5 @@
 """assert checks for pib.cli; run: python3 pib/test_cli.py (host, no container)."""
-import argparse, contextlib, hashlib, io, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile
+import argparse, contextlib, hashlib, io, json, os, re, shlex, shutil, signal, socket, struct, subprocess, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pib"))
@@ -647,19 +647,46 @@ with tempfile.TemporaryDirectory() as t:
         r = subprocess.run([str(ROOT / "host/pib"), "sign"], cwd=t, capture_output=True, text=True,
                            env={**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "SWU_SIGNING_KEY": str(missing)})
         assert r.returncode == 1 and r.stdout == "" and f"SWU_SIGNING_KEY: {missing} is not a file" in r.stderr, r
-    # each variable reaches only the command that reads it
-    KEY = "pkcs11:token=t;object=k"
-    for argv, env, passed in (
-            (["sign"], {"SWU_SIGNING_KEY": KEY, "PIB_CREDENTIALS": str(t / "keys/cred.txt")}, [f"SWU_SIGNING_KEY={KEY}"]),
-            (["build"], {"SWU_SIGNING_KEY": KEY, "SWU_SIGNING_CERT": str(t / "keys/cred.txt")}, []),
-            (["verify"], {"SWU_SIGNING_KEY": KEY, "PIB_CREDENTIALS": str(t / "keys/cred.txt")}, []),
-            (["--version"], {"SWU_SIGNING_KEY": KEY}, []),
-            ([], {"SWU_SIGNING_KEY": KEY}, [])):
-        r = subprocess.run([str(ROOT / "host/pib"), *argv], cwd=t, capture_output=True, text=True,
-                           env={**e, "PATH": f"{t}/bin:{os.environ['PATH']}", **env})
-        args = r.stdout.split("\n")
-        assert r.returncode == 0 and [a for a in args if a.startswith(("SWU_", "PIB_CREDENTIALS="))] == passed, (argv, env, args)
-        assert not any(a.startswith(f"{t}/keys/") for a in args), (argv, env, args)
+    # pcscd: a socket in a temp dir stands in for the host's, so every branch runs on any machine
+    (t / "pcscd").mkdir(); (t / "nopcscd").mkdir()
+    sk = socket.socket(socket.AF_UNIX); sk.bind(str(t / "pcscd/pcscd.comm"))
+    M, KEY, CRT = f"{t}/pcscd:/run/pcscd:ro", "pkcs11:token=t;object=k", "pkcs11:object=c"
+    def shim(argv, **env):  # a None value removes the variable
+        env = {k: v for k, v in {**e, "PATH": f"{t}/bin:{os.environ['PATH']}", **env}.items() if v is not None}
+        r = subprocess.run([str(ROOT / "host/pib"), *argv], cwd=t, capture_output=True, text=True, env=env)
+        assert r.returncode == 0 and r.stderr == "", r
+        return r.stdout.split("\n")
+    for argv, env, mounts, passed in (
+            # every pib sign gets the socket, however the key reaches it (--key, image.yaml, --pkcs)
+            (["sign"], {"SWU_SIGNING_KEY": KEY}, 1, [f"SWU_SIGNING_KEY={KEY}"]),
+            (["sign"], {"SWU_SIGNING_KEY": str(t / "keys/cred.txt")}, 1, ["SWU_SIGNING_KEY=/keys/SWU_SIGNING_KEY"]),
+            (["sign", "--pkcs11", KEY, "x.swu"], {}, 1, []),
+            (["sign"], {}, 1, []),
+            # two URIs share one mount: docker refuses a duplicate mount point
+            (["sign"], {"SWU_SIGNING_KEY": KEY, "SWU_SIGNING_CERT": CRT}, 1,
+             [f"SWU_SIGNING_KEY={KEY}", f"SWU_SIGNING_CERT={CRT}"]),
+            # a relative PIB_PCSCD_DIR is mounted by its absolute path, not as a named volume
+            (["sign"], {"PIB_PCSCD_DIR": "pcscd"}, 1, []),
+            (["sign"], {"SWU_SIGNING_KEY": KEY, "PIB_PCSCD_DIR": str(t / "nopcscd")}, 0, [f"SWU_SIGNING_KEY={KEY}"]),
+            (["sign"], {"PIB_PCSCD_DIR": str(t / "missing")}, 0, []),
+            (["sign"], {"PIB_PCSCD_DIR": "missing"}, 0, []),
+            (["sign"], {"PIB_PCSCD_DIR": "pcscd", "CDPATH": str(t)}, 1, []),  # cd prints the path
+            # the default is the host's /run/pcscd, mounted only where its socket is up
+            (["sign"], {"PIB_PCSCD_DIR": None},
+             ["/run/pcscd:/run/pcscd:ro"] if Path("/run/pcscd/pcscd.comm").is_socket() else [], []),
+            # each variable reaches only the command that reads it
+            (["sign"], {"PIB_CREDENTIALS": str(t / "keys/cred.txt")}, 1, []),
+            (["build"], {"SWU_SIGNING_KEY": KEY, "SWU_SIGNING_CERT": str(t / "keys/cred.txt")}, 0, []),
+            (["build", "--pkcs11", KEY], {}, 0, []),
+            (["verify"], {"SWU_SIGNING_KEY": KEY, "PIB_CREDENTIALS": str(t / "keys/cred.txt")}, 0, []),
+            (["--version"], {"SWU_SIGNING_KEY": KEY}, 0, []),
+            ([], {"SWU_SIGNING_KEY": KEY}, 0, [])):
+        args = shim(argv, **{"PIB_PCSCD_DIR": str(t / "pcscd"), **env})
+        want = [M] * mounts if isinstance(mounts, int) else mounts
+        assert [a for a in args if a.endswith(":/run/pcscd:ro")] == want, (argv, env, args)
+        assert [a for a in args if a.startswith(("SWU_", "PIB_CREDENTIALS="))] == passed, (argv, env, args)
+        assert any(a.startswith(f"{t}/keys/") for a in args) == any("=/keys/" in a for a in passed), (argv, env, args)
+    sk.close()
 hook = (ROOT / "configs/images/hooks/base.sh").read_text()
 assert all(" chpasswd" not in ln or "chpasswd -e" in ln for ln in hook.splitlines()), "no password in the hook"
 snip = hook[hook.index("if [ -n \"${PIB_CREDENTIALS"):hook.index("chroot \"$1\" usermod -a -G sima root")].replace('"$1"', "/r")

@@ -87,6 +87,7 @@ RUN printf 'Package: *\nPin: origin mirror.elxr.dev\nPin-Priority: 900\n' \
 # PKCS#11 (HSM/YubiKey) signing: pib sign --pkcs11 uses the engine.
         libengine-pkcs11-openssl \
         opensc \
+        libpcsclite1 \
 # Local apt repo for the customer's .debs.
         reprepro \
         nginx && \

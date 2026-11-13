@@ -38,6 +38,10 @@ for v in ${vars[@]+"${vars[@]}"}; do
                   -e "$v=/keys/$v") ;;
     esac
 done
+# pib sign reaches a token through the host pcscd, whichever way it gets the key.
+# Absolute: docker -v takes a bare name for a named volume.
+sock="$(CDPATH= cd -- "${PIB_PCSCD_DIR:-/run/pcscd}" 2>/dev/null && pwd)" || sock=
+if [ "${1:-}" = sign ] && [ -n "$sock" ] && [ -S "$sock/pcscd.comm" ]; then keys+=(-v "$sock:/run/pcscd:ro"); fi
 
 # The reference configs (PIB_CONFIGS=<dir>/configs) may live outside the
 # workspace: mount their repo read-only and point the container at the mount.
