@@ -101,14 +101,17 @@ mounted alone, read-only.
    `pib keys renew` replaces the signing leaf with a new one from the same CA.
    It needs `ca.key` back in `keys/`; pass the same `--algo` and `--cn` as for `pib keys init`.
 
-3. **Add custom packages** to `custom-debs/` and sign each one. `pib build` accepts
+3. **Add custom packages** to `custom-debs/` and sign them. `pib build` accepts
    only debs signed by the key in `debs.key`:
 
    ```bash
-   pib sign-deb custom-debs/my-app_1.0_arm64.deb
+   pib sign-debs
    ```
 
-   This writes `<deb>.sig`. `pib verify-debs` re-checks them.
+   This writes `<deb>.sig` for every deb in `custom-debs/`. `pib verify-debs` re-checks them.
+   List every custom deb other than the kernel under `packages.add` in `image.yaml`, by its
+   package name (the deb's `Package:` field), or it is not installed. The kernel keeps
+   SiMa.ai's name `linux-image-6.18.3-modalix` and needs no entry: the flavor installs it.
 
 4. **Edit `image.yaml`** (see below), then **build**:
 
@@ -168,7 +171,7 @@ mounted alone, read-only.
 | `base`, `target`, `release` | Flavor (`minimal`, `palette`, `securepalette`), platform, SiMa.ai release. `release` must match the container's release. |
 | `version` | `<release>.<build>`, all numeric, build 1..65535 (for example `<release>.4`). Boards refuse older versions. |
 | `slots` | `ab` (default: `rootfs.A` and `rootfs.B`) or `a` (single slot). |
-| `packages.add`, `packages.remove` | Packages added to or removed from the flavor's list. |
+| `packages.add`, `packages.remove` | Packages added to or removed from the flavor's list. Custom debs other than the kernel go in `add`. |
 | `overlay` | A directory inside the workspace, copied over `/` after SiMa.ai's overlays with every file owned by root. |
 | `hooks` | A list of script files in the workspace, run in order after SiMa.ai's customize hooks (paths: letters, digits and `_ . / + -` only). |
 | `signing.cert`, `signing.key`, `signing.ca` | Bundle signing leaf and key; `ca` is installed in the image as `/etc/swupdate/swupdate.crt`. |
@@ -208,22 +211,24 @@ mounted alone, read-only.
 
 ## Install on a board
 
-`root` can log in over SSH with a key only (`PermitRootLogin prohibit-password`): put your
-public key in `overlay/root/.ssh/authorized_keys` (`chmod 700` the `.ssh` directory and `600` the
-file: sshd ignores a key file others can write), or log in as `sima` and use `sudo`.
+These commands log in as `sima` with its password (from `PIB_CREDENTIALS` on a freshly
+flashed board) and use `sudo`; `ssh` and `sudo` each ask for it. `root` cannot log in over
+SSH without a key (`PermitRootLogin prohibit-password`). Optionally put your public key in
+`overlay/root/.ssh/authorized_keys` (`chmod 700` the `.ssh` directory and `600` the file: sshd
+ignores a key file others can write) to use `root@<board>` without `sudo`.
 
 The first install onto a board that does not yet trust your CA needs the CA file:
 
 ```bash
-scp out/<image>.swu keys/ca.crt root@<board>:/tmp/
-ssh root@<board> swupdate -i /tmp/<image>.swu -k /tmp/ca.crt -e update,full
-ssh root@<board> reboot
+scp out/<image>.swu keys/ca.crt sima@<board>:/tmp/
+ssh -t sima@<board> sudo swupdate -i /tmp/<image>.swu -k /tmp/ca.crt -e update,full
+ssh -t sima@<board> sudo reboot
 ```
 
 After that the image trusts the CA itself:
 
 ```bash
-ssh root@<board> simaai-update /tmp/<image>.swu -e update,full
+ssh -t sima@<board> sudo simaai-update /tmp/<image>.swu -e update,full
 ```
 
 `-e update,full` installs tRoot, boot and rootfs into the inactive slot, flips the

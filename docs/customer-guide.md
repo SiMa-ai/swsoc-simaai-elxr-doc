@@ -140,7 +140,8 @@ ATF and tRoot hold the root of trust and come from SiMa.ai: the build refuses an
 `atf-*` or `troot-*` package in `custom-debs/`. It also refuses `u-boot-modalix`:
 the board boots the U-Boot inside `/boot/fip.bin`, which the ATF package carries and
 PIB does not rebuild.
-Keep SiMa.ai's kernel package name (`linux-image-6.18.3-modalix`) with a higher version. The flavor's package list installs
+Keep SiMa.ai's kernel package name (`linux-image-6.18.3-modalix`), at any version: the build pins your debs
+above SiMa.ai's repository, so yours replaces the release kernel even when it is older. The flavor's package list installs
 `linux-image-6.18.3-modalix*`, so a kernel with another name is either not installed
 or (if it matches that pattern or is listed in `packages.add`) a second one.
 The image must end up with exactly one kernel, U-Boot and ATF package, with `/boot/fip.bin`, `/boot/u-boot.bin`

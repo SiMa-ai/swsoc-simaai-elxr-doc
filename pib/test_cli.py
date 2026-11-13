@@ -999,6 +999,30 @@ with tempfile.TemporaryDirectory() as t:
         for k, v in saved.items(): setattr(c, k, v)
         os.environ.pop("PIB_SIMA_APT_URL"); os.environ.pop("PIB_CODENAME")
         os.chdir(here)
+# sign-debs: every custom-debs/*.deb, nothing else, re-signs in place
+with tempfile.TemporaryDirectory() as d:
+    t = Path(d); here = os.getcwd(); os.chdir(t)
+    try:
+        (t / "keys").mkdir(); c.gen_deb_key(t / "keys"); pub, key = t / "keys/debs-signing.asc", "keys/debs-signing.secret.asc"
+        sign = lambda k=key: c.cmd_sign_debs(argparse.Namespace(key=k))
+        assert "no .debs in custom-debs/" in dies(sign), "no folder"
+        (t / c.DEBS).mkdir(); assert "no .debs in custom-debs/" in dies(sign), "empty folder"
+        a, b = t / c.DEBS / "a_1_arm64.deb", t / c.DEBS / "b_1_all.deb"
+        a.write_bytes(b"a"); (t / c.DEBS / "notes.txt").write_text("x")
+        sign(); c.check_deb_signature([a], pub)   # one deb
+        b.write_bytes(b"b"); out = io.StringIO()
+        with contextlib.redirect_stdout(out): sign()
+        c.check_deb_signature([a, b], pub)
+        assert out.getvalue() == "pib: wrote custom-debs/a_1_arm64.deb.sig\npib: wrote custom-debs/b_1_all.deb.sig\n", out.getvalue()
+        assert not (t / c.DEBS / "notes.txt.sig").exists()
+        b.write_bytes(b"b2"); assert "not signed by the customer key" in dies(c.check_deb_signature, [b], pub)
+        sign(); c.check_deb_signature([a, b], pub)   # existing .sig overwritten
+        b.with_name(b.name + ".sig").unlink()
+        assert "gpg failed" in dies(sign, "keys/missing.asc"); assert not b.with_name(b.name + ".sig").exists(), "bad key"
+    finally:
+        os.chdir(here)
+assert c.parser().parse_args(["sign-debs"]).fn is c.cmd_sign_debs
+assert dies(c.parser().parse_args, ["sign-deb", "x.deb"]) == "2", "old name gone"
 # --help lists the public commands only
 h = c.parser().format_help()
 assert "_finish" not in h and "SUPPRESS" not in h and "verify-debs" in h, h

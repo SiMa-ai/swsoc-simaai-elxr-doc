@@ -222,13 +222,16 @@ def key_fingerprint(keyfile):
     die(f"{keyfile} holds no OpenPGP key")
 
 
-def cmd_sign_deb(a):
-    deb = Path(a.deb)
+def cmd_sign_debs(a):
+    debs = sorted((Path.cwd() / DEBS).glob("*.deb"))
+    if not debs:
+        die(f"no .debs in {DEBS}/")
     with gpg_home() as h:
         gpg(h, "--import", a.key)
-        gpg(h, "--yes", "--detach-sign", "--output", f"{deb}.sig", deb)
-    chown(f"{deb}.sig")
-    print(f"pib: wrote {deb}.sig")
+        for deb in debs:
+            gpg(h, "--yes", "--detach-sign", "--output", f"{deb}.sig", deb)
+            chown(f"{deb}.sig")
+            print(f"pib: wrote {DEBS}/{deb.name}.sig")
 
 
 def cmd_keys_init(a):
@@ -1382,10 +1385,9 @@ def parser():
 
     sub.add_parser("verify-debs", help="check custom-debs/ signatures").set_defaults(fn=cmd_verify_debs)
 
-    s = sub.add_parser("sign-deb", help="sign a custom .deb (writes <deb>.sig)")
-    s.add_argument("deb")
+    s = sub.add_parser("sign-debs", help="sign every custom-debs/*.deb (writes <deb>.sig)")
     s.add_argument("--key", default="keys/debs-signing.secret.asc")
-    s.set_defaults(fn=cmd_sign_deb)
+    s.set_defaults(fn=cmd_sign_debs)
 
     s = sub.add_parser("build", help="run the image build (rs build)")
     s.add_argument("--dev", action="store_true",
