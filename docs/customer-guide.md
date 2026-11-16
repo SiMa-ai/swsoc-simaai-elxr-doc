@@ -6,8 +6,8 @@ this guide covers what you need to know around them.
 
 ## Prerequisites
 
-- A Linux host with Docker that allows privileged containers. The build uses loop
-  devices, LVM and, on an x86-64 host, an arm64 binfmt handler (qemu-user-static installed on the host).
+- A Linux amd64 (x86-64) host with Docker that allows privileged containers. The build
+  uses loop devices, LVM and an arm64 binfmt handler (qemu-user-static installed on the host).
 - Network access to the Debian, eLxr and SiMa.ai package repositories, or your own
   mirrors named in `sources` and `sima_source`. There is no offline mode.
 - Time and space: a minimal image build took about 25 minutes and left 3.5 GB in
@@ -167,7 +167,7 @@ hook `base.sh`). Updates arrive over `scp` and `simaai-update`, or your own tool
 
 Building changes things on the host outside the workspace:
 
-- `binfmt_misc`: the container does not register anything. On an x86-64 host the arm64
+- `binfmt_misc`: the container does not register anything. The arm64
   handler (qemu-user-static) must already be installed and enabled, or the container
   stops at start.
 - Loop devices and LVM: the build attaches the image to a loop device and creates a

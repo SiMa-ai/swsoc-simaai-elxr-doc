@@ -9,7 +9,7 @@
 # For "pib build" and a shell, prepares what "rs build" expects from its
 # surroundings, then runs the given command (bash when none); other pib commands run directly:
 #   - a check for the host's arm64 binfmt handler, so mmdebstrap can run arm64 maintainer
-#     scripts under qemu-user-static on an x86-64 host
+#     scripts under qemu-user-static
 #   - a local apt repo at http://localhost/deb/custom holding every .deb in
 #     /workspace/custom-debs, signed with a key made for this run alone; the
 #     image's apt pinning ranks it above SiMa.ai's repo, so a customer
@@ -38,23 +38,21 @@ KEY_UID="PIB local repo <pib-local-repo@localhost>"
 if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
 fi
-if [ "$(uname -m)" != "aarch64" ]; then
-    case "$(head -n1 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null)" in
-        enabled) ;;
-        disabled) echo "pib: the host's qemu-aarch64 binfmt handler is disabled;" \
-                       "enable it on the host" >&2; exit 1 ;;
-        *) echo "pib: no arm64 binfmt handler; install qemu-user-static on the host" >&2; exit 1 ;;
-    esac
-    # Without the F flag the interpreter must exist in the container; with it the kernel holds it open.
-    entry=/proc/sys/fs/binfmt_misc/qemu-aarch64
-    interp="$(sed -n 's/^interpreter //p' "$entry")"
-    case "$(sed -n 's/^flags: //p' "$entry")" in
-        *F*) ;;
-        *) [ -x "$interp" ] || { echo "pib: the host's arm64 binfmt handler" \
-               "has no F flag and $interp is not in the container;" \
-               "re-register it with the F flag (qemu-user-static)" >&2; exit 1; } ;;
-    esac
-fi
+case "$(head -n1 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null)" in
+    enabled) ;;
+    disabled) echo "pib: the host's qemu-aarch64 binfmt handler is disabled;" \
+                   "enable it on the host" >&2; exit 1 ;;
+    *) echo "pib: no arm64 binfmt handler; install qemu-user-static on the host" >&2; exit 1 ;;
+esac
+# Without the F flag the interpreter must exist in the container; with it the kernel holds it open.
+entry=/proc/sys/fs/binfmt_misc/qemu-aarch64
+interp="$(sed -n 's/^interpreter //p' "$entry")"
+case "$(sed -n 's/^flags: //p' "$entry")" in
+    *F*) ;;
+    *) [ -x "$interp" ] || { echo "pib: the host's arm64 binfmt handler" \
+           "has no F flag and $interp is not in the container;" \
+           "re-register it with the F flag (qemu-user-static)" >&2; exit 1; } ;;
+esac
 
 # --- local repo signing key ---------------------------------------------------
 # Made fresh for each container run in a temporary directory: the repo below
