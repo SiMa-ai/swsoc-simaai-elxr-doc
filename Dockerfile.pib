@@ -13,9 +13,12 @@
 # Build context is this directory. dist/ holds the SiMa.ai pasha wheel
 # (pasha-<release>-py3-none-any.whl, the rucksack image-build modules) and
 # RELEASE the release it is for, both checked in by SiMa.ai for each release,
-# and eLxr's elxr-config archive (see UPSTREAM):
+# and eLxr's elxr-config archive and base image tarballs (see UPSTREAM):
 #
-#   docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
+#   A=$(docker version -f '{{.Server.Arch}}')
+#   sha256sum -c dist/elxr-base-bianca-26.04.02.sha256 &&
+#     docker load -i dist/elxr-base-bianca-26.04.02-$A.tar.gz &&
+#     docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
 #
 # The container needs
 # --privileged for loop devices and LVM, and the
@@ -30,9 +33,10 @@
 # .debs in /workspace/custom-debs are served to the build from a signed
 # local repo that outranks SiMa.ai's packages (see entrypoint.sh).
 
-# The base is pinned by digest; the apt packages below float with the eLxr
-# mirror. Bump the digest deliberately (docker pull elxrlinux/elxr).
-ARG BASE_IMAGE=elxrlinux/elxr@sha256:922b153fccfe20337d71586dc9a6823cbe4cf0769ecec431279c662029814058
+# The base is eLxr's elxrlinux/elxr bianca-26.04.02, loaded from dist/ (see UPSTREAM);
+# the apt packages below float with the eLxr mirror.
+ARG TARGETARCH
+ARG BASE_IMAGE=elxr-base:bianca-26.04.02-${TARGETARCH}
 FROM ${BASE_IMAGE}
 
 # SiMa.ai's public apt repo; CODENAME names its suite for this release.

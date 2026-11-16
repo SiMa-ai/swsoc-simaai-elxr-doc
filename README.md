@@ -14,7 +14,7 @@ SiMa.ai SDK manual:
 | `Dockerfile.pib`, `entrypoint.sh`, `files/` | The container (eLxr base, rucksack, a local signed apt repo for `custom-debs/`) |
 | `RELEASE` | The SiMa.ai release this checkout builds (written with the pasha wheel for each release) |
 | `CODENAME` | The eLxr suite of that release (written with `RELEASE`) |
-| `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release), and the `elxr-config` archive it unpacks |
+| `dist/` | Wheels the Dockerfile installs, the SiMa.ai pasha wheel included (packed and checked in for each release), the `elxr-config` archive it unpacks, and the eLxr base image |
 | `pib/` | The `pib` Python package and its `pyproject.toml` |
 | `host/pib` | Host shim: runs the container with the current directory as the workspace |
 | `configs/images/` | Image configs for each flavor (`image-{minimal,palette,securepalette}-modalix.yaml`), with the stage list, params, hooks, overlay and SWU files they use |
@@ -30,7 +30,8 @@ the keys in the image's U-Boot. The `<release>` packages are signed with the dev
 be signed for shipping: a shippable `securepalette` needs kernel, U-Boot and ATF packages
 signed with a production key.
 
-The base image is pinned by digest and the debsbom wheels are checked against hashes;
+The base image and `elxr-config` come from `dist/` and are checked by sha256, and the
+debsbom wheels are checked against hashes;
 the pasha wheel in `dist/` and the `pib` package are installed without a hash check. The eLxr apt packages (rucksack, mmdebstrap, qemu) are whatever the eLxr
 mirror serves when the image is built.
 
@@ -55,11 +56,58 @@ SiMa.ai packs and checks in for each release; the Dockerfile stops with that mes
 when the wheel is missing.
 
 ```bash
-docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
+A=$(docker version -f '{{.Server.Arch}}')
+sha256sum -c dist/elxr-base-bianca-26.04.02.sha256 &&
+  docker load -i dist/elxr-base-bianca-26.04.02-$A.tar.gz &&
+  docker build -f Dockerfile.pib -t "sima-image-builder:$(cat RELEASE)" .
 ```
 
+`docker version -f '{{.Server.Arch}}'` gives the Docker engine's arch (`amd64` or `arm64`), so
+`docker load` adds the matching eLxr base image (`elxrlinux/elxr` bianca-26.04.02) as
+`elxr-base:bianca-26.04.02-<arch>`, which the build starts from; no base image is pulled. The
+arch is the host's, not the board's: either one builds the same arm64 images.
+
+The chain stops at a failed check, and `docker load` moves the tag to the image it checked.
+Before a later build that skips the load, check the tag still names that image:
+
+```bash
+docker image inspect -f '{{.RootFS.Layers}}' elxr-base:bianca-26.04.02-$A
+```
+
+It must print the layer digest below (the same in either Docker image store); any other
+digest means another image has that tag, so stop and load it again.
+
+| Arch | Layer digest |
+|---|---|
+| `amd64` | `[sha256:ba5115b0d69b4ba841de08b2f073f0720fe8f9fab39b655184393d92050aadbc]` |
+| `arm64` | `[sha256:1c6f97d4ea0c5be1e24bf230db5fc6c066fc60f48e227aa64263f2d7e9eac51a]` |
+
 The Dockerfile needs BuildKit, the default builder since Docker Engine 23.0 when the
-buildx plugin is installed. On older engines, set `DOCKER_BUILDKIT=1`.
+buildx plugin is installed. On older engines, set `DOCKER_BUILDKIT=1`. Use the default
+`docker` builder: a `docker-container` buildx builder cannot see images added with
+`docker load`, so `FROM elxr-base:...` fails with "pull access denied".
+
+The tarballs change only with a new eLxr base, not with each release. They were made with
+the commands below, which give the same files again with Docker 29.1.3 and its classic
+overlay2 image store (the containerd image store writes different files).
+`imagetools inspect` lists the linux/amd64 and linux/arm64 manifest digests under the tag's
+index (`sha256:922b153f...`); pull each one by its digest:
+
+```bash
+docker buildx imagetools inspect elxrlinux/elxr:bianca-26.04.02
+docker pull elxrlinux/elxr@sha256:9305f91cc2fc1b3493dfa5a1db7dc332154abb47f73699faef4adc7ea0d50e42
+docker tag elxrlinux/elxr@sha256:9305f91cc2fc1b3493dfa5a1db7dc332154abb47f73699faef4adc7ea0d50e42 elxr-base:bianca-26.04.02-amd64
+docker save elxr-base:bianca-26.04.02-amd64 | gzip -n -9 > dist/elxr-base-bianca-26.04.02-amd64.tar.gz
+docker pull elxrlinux/elxr@sha256:3039b18be1d329c0d4a253f9f1498c988c91da295cceb881292daeed5e69936f
+docker tag elxrlinux/elxr@sha256:3039b18be1d329c0d4a253f9f1498c988c91da295cceb881292daeed5e69936f elxr-base:bianca-26.04.02-arm64
+docker save elxr-base:bianca-26.04.02-arm64 | gzip -n -9 > dist/elxr-base-bianca-26.04.02-arm64.tar.gz
+sha256sum dist/elxr-base-bianca-26.04.02-amd64.tar.gz dist/elxr-base-bianca-26.04.02-arm64.tar.gz > dist/elxr-base-bianca-26.04.02.sha256
+docker image inspect -f '{{.RootFS.Layers}}' elxr-base:bianca-26.04.02-amd64 elxr-base:bianca-26.04.02-arm64
+```
+
+For a new tag, use its own digests and name, and update every place that names the
+base: `Dockerfile.pib` (`BASE_IMAGE` and the header), this section and the layer digest
+table, `UPSTREAM` and `dist/.gitignore`.
 
 The build also unpacks `elxr-config` (eLxr manifests and overlay): GitLab's archive of
 1.1.0+elxr14 (a pinned commit), checked in to `dist/` and checked by sha256.

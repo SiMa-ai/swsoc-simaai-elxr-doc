@@ -2,6 +2,14 @@ Vendored from SiMa.ai image configs (per eLxr release):
   SiMa.ai 3.0.0 image configs: configs/images (minimal, palette, securepalette; version and codename included from /etc/pib-release and /etc/pib-codename), two scripts
 elxr-config is not vendored: dist/ holds GitLab's archive of commit 75cce34 (1.1.0+elxr14) of
 https://gitlab.com/elxr/tools/elxr-config, unchanged, and the Dockerfile checks its sha256.
+The eLxr base image is not vendored either: dist/elxr-base-bianca-26.04.02-{amd64,arm64}.tar.gz
+are docker save of
+elxrlinux/elxr@sha256:922b153fccfe20337d71586dc9a6823cbe4cf0769ecec431279c662029814058
+(Docker Hub tag bianca-26.04.02), linux/amd64 and linux/arm64, image IDs 3e0db91277bd and
+5235ec46580b, unchanged; their sha256s are in dist/elxr-base-bianca-26.04.02.sha256.
+Source for its packages:
+deb-src http://mirror.elxr.dev/elxr bianca bianca-updates bianca-security
+(main main-debian-community non-free-firmware non-free-firmware-debian-community contrib).
 Changed from upstream:
 - Package sources: repo.sima.ai is the only SiMa.ai apt host (hooks/minimal.sh,
   hooks/base.sh, 98simaai-repository), and the SiMa.ai mirror in image-stages.yaml
