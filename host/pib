@@ -34,20 +34,20 @@ for v in ${vars[@]+"${vars[@]}"}; do
     case "$f" in
         pkcs11:*) keys+=(-e "$v=$f") ;;
         *) [ -f "$f" ] || { echo "pib: $v: $f is not a file" >&2; exit 1; }
-           keys+=(-v "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")":"/keys/$v":ro
+           keys+=(-v "$(CDPATH='' cd -- "$(dirname "$f")" && pwd)/$(basename "$f")":"/keys/$v":ro
                   -e "$v=/keys/$v") ;;
     esac
 done
 # pib sign reaches a token through the host pcscd, whichever way it gets the key.
 # Absolute: docker -v takes a bare name for a named volume.
-sock="$(CDPATH= cd -- "${PIB_PCSCD_DIR:-/run/pcscd}" 2>/dev/null && pwd)" || sock=
+sock="$(CDPATH='' cd -- "${PIB_PCSCD_DIR:-/run/pcscd}" 2>/dev/null && pwd)" || sock=
 if [ "${1:-}" = sign ] && [ -n "$sock" ] && [ -S "$sock/pcscd.comm" ]; then keys+=(-v "$sock:/run/pcscd:ro"); fi
 
 # The reference configs (PIB_CONFIGS=<dir>/configs) may live outside the
 # workspace: mount their repo read-only and point the container at the mount.
 cfg=()
 if [ -n "${PIB_CONFIGS:-}" ]; then
-    d="$(cd "$PIB_CONFIGS" && pwd)"
+    d="$(CDPATH='' cd -- "$PIB_CONFIGS" && pwd)"
     cfg=(-v "$(dirname "$d")":/pib-src:ro -e "PIB_CONFIGS=/pib-src/$(basename "$d")")
 fi
 
